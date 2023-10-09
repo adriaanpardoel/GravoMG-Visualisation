@@ -5,6 +5,10 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polyhedron_3.h>
 
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
 #include "learnopengl/shader.h"
 #include "learnopengl/camera.h"
 
@@ -39,6 +43,9 @@ glm::vec2 mousePressedPosition;
 // rotation
 glm::vec2 rotationAngles;
 glm::vec2 rotationAnglesDrag;
+
+// user settings
+static float phi = 0.25f;
 
 int main()
 {
@@ -77,6 +84,14 @@ int main()
         std::cerr << "Failed to initialize GLEW" << std::endl;
         return -1;
     }
+
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init();
 
     // build and compile our shader program
     // ------------------------------------
@@ -151,6 +166,19 @@ int main()
     // -----------
     while (!glfwWindowShouldClose(window))
     {
+        // render imgui window
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::Begin("Options", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
+        ImGui::SetWindowPos(ImVec2(10, 10));
+        ImGui::SetWindowSize(ImVec2(120, 40));
+
+        ImGui::DragFloat("phi", &phi, 0.005f);
+
+        ImGui::End();
+
         // input
         // -----
         processInput(window);
@@ -188,6 +216,9 @@ int main()
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
         glDrawElements(GL_LINES, 2 * nEdges, GL_UNSIGNED_INT, 0);
 
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
         // -------------------------------------------------------------------------------
         glfwSwapBuffers(window);
@@ -200,6 +231,10 @@ int main()
     glDeleteBuffers(1, &vertexBuffer);
     glDeleteBuffers(1, &colorBuffer);
     glDeleteBuffers(1, &edgeBuffer);
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
 
     // glfw: terminate, clearing all previously allocated GLFW resources.
     // ------------------------------------------------------------------
@@ -246,6 +281,11 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 // -------------------------------------------------------
 void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
 {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        return;
+    }
+
     if (mousePressed) {
         if (firstCursorPositionCallbackOnPress) {
             mousePressedPosition = glm::vec2(xpos, ypos);

@@ -7,3 +7,6 @@
 # CMake
 cmake-build-debug
 cmake-build-release
+
+# ImGui
+imgui.ini
