@@ -22,11 +22,12 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
 void cursor_position_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
+void window_size_callback(GLFWwindow* window, int width, int height);
 void processInput(GLFWwindow *window);
 
 // settings
-const unsigned int SCR_WIDTH = 800;
-const unsigned int SCR_HEIGHT = 600;
+int screenWidth = 800;
+int screenHeight = 600;
 
 // dynamic arrays for geometry
 GLfloat *vertices = NULL;
@@ -55,6 +56,7 @@ int main()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 
 #ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
@@ -62,7 +64,7 @@ int main()
 
     // glfw window creation
     // --------------------
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "GravoMG Visualisation", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(screenWidth, screenHeight, "GravoMG Visualisation", NULL, NULL);
     if (window == NULL)
     {
         std::cout << "Failed to create GLFW window" << std::endl;
@@ -70,12 +72,14 @@ int main()
         return -1;
     }
     glfwMakeContextCurrent(window);
+    glfwGetWindowSize(window, &screenWidth, &screenHeight);
 
     // glfw callbacks
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetCursorPosCallback(window, cursor_position_callback);
     glfwSetScrollCallback(window, scroll_callback);
+    glfwSetWindowSizeCallback(window, window_size_callback);
 
     // initialize glew
     // ---------------------------------------
@@ -184,7 +188,7 @@ int main()
         processInput(window);
 
         // pass projection matrix to shader (note that in this case it could change every frame)
-        glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)screenWidth / (float)screenHeight, 0.1f, 100.0f);
         ourShader.setMat4("projection", projection);
 
         // camera/view transformation
@@ -292,8 +296,8 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
             firstCursorPositionCallbackOnPress = false;
         }
 
-        float xRotationAngleDrag = (ypos - mousePressedPosition.y) * M_PI / SCR_HEIGHT;
-        float yRotationAngleDrag = (xpos - mousePressedPosition.x) * M_PI / SCR_WIDTH;
+        float xRotationAngleDrag = (ypos - mousePressedPosition.y) * M_PI / screenHeight;
+        float yRotationAngleDrag = (xpos - mousePressedPosition.x) * M_PI / screenWidth;
         rotationAnglesDrag = glm::vec2(xRotationAngleDrag, yRotationAngleDrag);
     }
 }
@@ -303,4 +307,11 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
     camera.ProcessMouseScroll(static_cast<float>(yoffset));
+}
+
+// glfw: whenever the window is resized, this callback is fired
+void window_size_callback(GLFWwindow* window, int width, int height)
+{
+    screenWidth = width;
+    screenHeight = height;
 }
