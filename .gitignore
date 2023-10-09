@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# JetBrains
+.idea
+
+# CMake
+cmake-build-debug
+cmake-build-release
