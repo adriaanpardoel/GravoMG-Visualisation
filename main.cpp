@@ -5,6 +5,7 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polyhedron_3.h>
 #include <CGAL/Heat_method_3/Surface_mesh_geodesic_distances_3.h>
+#include <CGAL/Surface_mesh_shortest_path.h>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_glfw.h"
@@ -22,6 +23,9 @@ typedef CGAL::Polyhedron_3<K> Polyhedron;
 typedef boost::graph_traits<SurfaceMesh>::vertex_descriptor VertexDescriptor;
 typedef SurfaceMesh::Property_map<VertexDescriptor, double> VertexDistanceMap;
 typedef CGAL::Heat_method_3::Surface_mesh_geodesic_distances_3<SurfaceMesh> HeatMethod;
+
+typedef CGAL::Surface_mesh_shortest_path_traits<K, SurfaceMesh> Traits;
+typedef CGAL::Surface_mesh_shortest_path<Traits> Surface_mesh_shortest_path;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
@@ -93,6 +97,31 @@ std::vector<SurfaceMesh::Vertex_index> samplePoints(SurfaceMesh* surface) {
     return V;
 }
 
+std::vector<SurfaceMesh::Vertex_index> createNeighbourhoods(SurfaceMesh* surface, std::vector<SurfaceMesh::Vertex_index> sampling) {
+    Surface_mesh_shortest_path shortestPaths(*surface);
+    shortestPaths.add_source_points(sampling.begin(), sampling.end());
+
+    std::vector<SurfaceMesh::Vertex_index> res(surface->num_vertices());
+
+    for (auto v : surface->vertices()) {
+        auto i = v.idx();
+        auto loc = *(shortestPaths.shortest_distance_to_source_points(v).second);
+        auto f = loc.first;
+        auto bc = loc.second;
+
+        auto h = surface->halfedge(f);
+        if (bc[0] >= bc[1] && bc[0] >= bc[2]) {
+            res.at(i) = surface->source(h);
+        } else if (bc[1] >= bc[2]) {
+            res.at(i) = surface->target(h);
+        } else {
+            res.at(i) = surface->target(surface->next(h));
+        }
+    }
+
+    return res;
+}
+
 int main()
 {
     // glfw: initialize and configure
@@ -157,6 +186,7 @@ int main()
     CGAL::copy_face_graph( mesh, surface);
 
     auto sampling = samplePoints(&surface);
+    auto neighbourhoods = createNeighbourhoods(&surface, sampling);
 
     auto nVertices = surface.num_vertices();
     auto nEdges = surface.num_edges();
@@ -169,7 +199,8 @@ int main()
     vertices = new float[nVertices * 3];
     edges = new uint[nEdges * 2];
 
-    std::vector<glm::vec3> vertexColors(nVertices);
+    std::vector<glm::vec3> vertexColorsLeft(nVertices);
+    std::vector<glm::vec3> vertexColorsRight(nVertices);
 
     auto contains = [](auto v, auto x) { return std::find(v.begin(), v.end(), x) != v.end(); };
 
@@ -181,7 +212,10 @@ int main()
         vertices[i*3 + 1] = (float) p.y();
         vertices[i*3 + 2] = (float) p.z();
 
-        vertexColors.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
+        vertexColorsLeft.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
+
+        int neighbourhood = neighbourhoods.at(i).idx();
+        vertexColorsRight.at(i) = glm::vec3(((neighbourhood * 3) % 255) / 255.0f, ((neighbourhood * 5) % 255) / 255.0f, ((neighbourhood * 7) % 255) / 255.0f);
     }
 
     for (auto edgeIndex : surface.edges()) {
@@ -203,9 +237,6 @@ int main()
 
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
     glBufferData(GL_ARRAY_BUFFER, 3 * nVertices * sizeof(GLfloat), vertices, GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
-    glBufferData(GL_ARRAY_BUFFER, vertexColors.size() * sizeof(glm::vec3), &vertexColors[0], GL_STATIC_DRAW);
 
     // position attribute
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
@@ -237,14 +268,15 @@ int main()
         if (!ImGui::IsItemActive() && phi != prevPhi) {
             prevPhi = phi;
             sampling = samplePoints(&surface);
+            neighbourhoods = createNeighbourhoods(&surface, sampling);
 
             for (auto vertexIndex : surface.vertices()) {
                 auto i = vertexIndex.idx();
-                vertexColors.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
-            }
+                vertexColorsLeft.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
 
-            glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
-            glBufferData(GL_ARRAY_BUFFER, vertexColors.size() * sizeof(glm::vec3), &vertexColors[0], GL_STATIC_DRAW);
+                int neighbourhood = neighbourhoods.at(i).idx();
+                vertexColorsRight.at(i) = glm::vec3(((neighbourhood * 3) % 255) / 255.0f, ((neighbourhood * 5) % 255) / 255.0f, ((neighbourhood * 7) % 255) / 255.0f);
+            }
         }
 
         ImGui::End();
@@ -282,22 +314,30 @@ int main()
 
         // render the triangle
         ourShader.use();
-        glDisableVertexAttribArray(1);
 
-        // draw vertices
-        glBindVertexArray(vertexArray);
-        glDrawArrays(GL_POINTS, 0, nVertices);
+        glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+        glBufferData(GL_ARRAY_BUFFER, vertexColorsLeft.size() * sizeof(glm::vec3), &vertexColorsLeft[0], GL_STATIC_DRAW);
 
         // draw edges
+        glDisableVertexAttribArray(1);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
         glDrawElements(GL_LINES, 2 * nEdges, GL_UNSIGNED_INT, 0);
+
+        // draw vertices
+        glEnableVertexAttribArray(1);
+        glBindVertexArray(vertexArray);
+        glDrawArrays(GL_POINTS, 0, nVertices);
 
         glViewport(vpWidth, 0, vpWidth, vpHeight);
 
         // render the triangle
         ourShader.use();
 
+        glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+        glBufferData(GL_ARRAY_BUFFER, vertexColorsRight.size() * sizeof(glm::vec3), &vertexColorsRight[0], GL_STATIC_DRAW);
+
         // draw edges
+        glDisableVertexAttribArray(1);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
         glDrawElements(GL_LINES, 2 * nEdges, GL_UNSIGNED_INT, 0);
 
