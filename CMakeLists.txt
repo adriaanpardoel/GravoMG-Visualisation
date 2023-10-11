@@ -50,6 +50,9 @@ find_package(GLEW REQUIRED)
 # GLM
 find_package(glm REQUIRED)
 
+# Eigen
+find_package (Eigen3 3.3 REQUIRED NO_MODULE)
+
 
 # Creating entries for target: GravoMG_Visualisation
 # ##################################################
@@ -66,6 +69,7 @@ target_link_libraries(GravoMG_Visualisation PRIVATE CGAL::CGAL)
 target_link_libraries(GravoMG_Visualisation PUBLIC glfw ${OPENGL_gl_LIBRARY})
 target_link_libraries(GravoMG_Visualisation PUBLIC GLEW::GLEW)
 target_link_libraries(GravoMG_Visualisation PUBLIC glm::glm)
+target_link_libraries(GravoMG_Visualisation PUBLIC Eigen3::Eigen)
 
 # ImGui
 set(IMGUI_DIR imgui)

@@ -4,6 +4,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polyhedron_3.h>
+#include <CGAL/Heat_method_3/Surface_mesh_geodesic_distances_3.h>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_glfw.h"
@@ -18,6 +19,10 @@ typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
 typedef CGAL::Surface_mesh<K::Point_3> SurfaceMesh;
 typedef CGAL::Polyhedron_3<K> Polyhedron;
 
+typedef boost::graph_traits<SurfaceMesh>::vertex_descriptor VertexDescriptor;
+typedef SurfaceMesh::Property_map<VertexDescriptor, double> VertexDistanceMap;
+typedef CGAL::Heat_method_3::Surface_mesh_geodesic_distances_3<SurfaceMesh> HeatMethod;
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
 void cursor_position_callback(GLFWwindow* window, double xpos, double ypos);
@@ -28,6 +33,9 @@ void processInput(GLFWwindow *window);
 // settings
 int screenWidth = 800;
 int screenHeight = 600;
+
+int frameBufferWidth;
+int frameBufferHeight;
 
 // dynamic arrays for geometry
 GLfloat *vertices = NULL;
@@ -46,7 +54,43 @@ glm::vec2 rotationAngles;
 glm::vec2 rotationAnglesDrag;
 
 // user settings
-static float phi = 0.25f;
+static float phi = 0.125f;
+
+std::vector<SurfaceMesh::Vertex_index> samplePoints(SurfaceMesh* surface) {
+    float sumEdgeLengths = 0.0f;
+
+    for (auto edgeIndex : surface->edges()) {
+        auto h = surface->halfedge(edgeIndex);
+        auto from = surface->point(surface->source(h));
+        auto to = surface->point(surface->target(h));
+        auto d = CGAL::sqrt(CGAL::squared_distance(from, to));
+        sumEdgeLengths += (float) d;
+    }
+
+    float averageEdgeLength = sumEdgeLengths / surface->num_edges();
+    float r = pow(phi, -1.0f/3.0f) * averageEdgeLength;
+
+    std::vector<SurfaceMesh::Vertex_index> V;
+    for (auto vertexIndex : surface->vertices()) {
+        V.push_back(vertexIndex);
+    }
+
+    std::cout << V.size() << std::endl << std::endl;
+
+    for (auto it = V.begin(); it < V.end(); it++) {
+        VertexDistanceMap vertexDistance = surface->add_property_map<VertexDescriptor, double>("v:distance", 0).first;
+        VertexDescriptor source = *it;
+        HeatMethod hm(*surface);
+        hm.add_source(source);
+        hm.estimate_geodesic_distances(vertexDistance);
+
+        auto withinRadius = [&vertexDistance, &r](auto v) { return get(vertexDistance, v) < r; };
+        V.erase(std::remove_if(it + 1, V.end(), withinRadius), V.end());
+    }
+
+    std::cout << V.size() << std::endl << std::endl;
+    return V;
+}
 
 int main()
 {
@@ -73,6 +117,7 @@ int main()
     }
     glfwMakeContextCurrent(window);
     glfwGetWindowSize(window, &screenWidth, &screenHeight);
+    glfwGetFramebufferSize(window, &frameBufferWidth, &frameBufferHeight);
 
     // glfw callbacks
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
@@ -110,6 +155,8 @@ int main()
     in >> mesh;
     CGAL::copy_face_graph( mesh, surface);
 
+    auto sampling = samplePoints(&surface);
+
     auto nVertices = surface.num_vertices();
     auto nEdges = surface.num_edges();
 
@@ -121,6 +168,10 @@ int main()
     vertices = new float[nVertices * 3];
     edges = new uint[nEdges * 2];
 
+    std::vector<glm::vec3> vertexColors(nVertices);
+
+    auto contains = [](auto v, auto x) { return std::find(v.begin(), v.end(), x) != v.end(); };
+
     for (auto vertexIndex : surface.vertices()) {
         auto i = vertexIndex.idx();
         auto p = surface.point(vertexIndex);
@@ -128,6 +179,8 @@ int main()
         vertices[i*3]     = (float) p.x();
         vertices[i*3 + 1] = (float) p.y();
         vertices[i*3 + 2] = (float) p.z();
+
+        vertexColors.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
     }
 
     for (auto edgeIndex : surface.edges()) {
@@ -150,8 +203,8 @@ int main()
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
     glBufferData(GL_ARRAY_BUFFER, 3 * nVertices * sizeof(GLfloat), vertices, GL_STATIC_DRAW);
 
-//    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
-//    glBufferData(GL_ARRAY_BUFFER, sizeof(vertexColors), vertexColors, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+    glBufferData(GL_ARRAY_BUFFER, vertexColors.size() * sizeof(glm::vec3), &vertexColors[0], GL_STATIC_DRAW);
 
     // position attribute
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
@@ -159,9 +212,9 @@ int main()
     glEnableVertexAttribArray(0);
 
     // color attribute
-//    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
-//    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
-//    glEnableVertexAttribArray(1);
+    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glEnableVertexAttribArray(1);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, 2 * nEdges * sizeof(GLuint), edges, GL_STATIC_DRAW);
@@ -187,8 +240,11 @@ int main()
         // -----
         processInput(window);
 
+        int vpWidth = 0.5 * frameBufferWidth;
+        int vpHeight = 0.9 * frameBufferHeight;
+
         // pass projection matrix to shader (note that in this case it could change every frame)
-        glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)screenWidth / (float)screenHeight, 0.1f, 100.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)vpWidth / (float)vpHeight, 0.1f, 100.0f);
         ourShader.setMat4("projection", projection);
 
         // camera/view transformation
@@ -202,15 +258,18 @@ int main()
         ourShader.setMat4("model", model);
 
         // set point size
-        glPointSize(2 * 45 / camera.Zoom);
+        glPointSize(5 * 45 / camera.Zoom);
 
         // render
         // ------
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
+        glViewport(0, 0, vpWidth, vpHeight);
+
         // render the triangle
         ourShader.use();
+        glDisableVertexAttribArray(1);
 
         // draw vertices
         glBindVertexArray(vertexArray);
@@ -219,6 +278,20 @@ int main()
         // draw edges
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
         glDrawElements(GL_LINES, 2 * nEdges, GL_UNSIGNED_INT, 0);
+
+        glViewport(vpWidth, 0, vpWidth, vpHeight);
+
+        // render the triangle
+        ourShader.use();
+
+        // draw edges
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
+        glDrawElements(GL_LINES, 2 * nEdges, GL_UNSIGNED_INT, 0);
+
+        // draw vertices
+        glEnableVertexAttribArray(1);
+        glBindVertexArray(vertexArray);
+        glDrawArrays(GL_POINTS, 0, nVertices);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -260,7 +333,8 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     // make sure the viewport matches the new window dimensions; note that width and 
     // height will be significantly larger than specified on retina displays.
-    glViewport(0, 0, width, height);
+    frameBufferWidth = width;
+    frameBufferHeight = height;
 }
 
 // glfw: whenever a mouse button is pressed, this callback is  called
@@ -296,8 +370,8 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
             firstCursorPositionCallbackOnPress = false;
         }
 
-        float xRotationAngleDrag = (ypos - mousePressedPosition.y) * M_PI / screenHeight;
-        float yRotationAngleDrag = (xpos - mousePressedPosition.x) * M_PI / screenWidth;
+        float xRotationAngleDrag = (ypos - mousePressedPosition.y) * 2 * M_PI / screenHeight;
+        float yRotationAngleDrag = (xpos - mousePressedPosition.x) * 2 * M_PI / screenWidth;
         rotationAnglesDrag = glm::vec2(xRotationAngleDrag, yRotationAngleDrag);
     }
 }
