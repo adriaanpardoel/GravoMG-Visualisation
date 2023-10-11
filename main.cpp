@@ -55,6 +55,7 @@ glm::vec2 rotationAnglesDrag;
 
 // user settings
 static float phi = 0.125f;
+static float prevPhi = phi;
 
 std::vector<SurfaceMesh::Vertex_index> samplePoints(SurfaceMesh* surface) {
     float sumEdgeLengths = 0.0f;
@@ -233,6 +234,18 @@ int main()
         ImGui::SetWindowSize(ImVec2(120, 40));
 
         ImGui::DragFloat("phi", &phi, 0.005f);
+        if (!ImGui::IsItemActive() && phi != prevPhi) {
+            prevPhi = phi;
+            sampling = samplePoints(&surface);
+
+            for (auto vertexIndex : surface.vertices()) {
+                auto i = vertexIndex.idx();
+                vertexColors.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
+            }
+
+            glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+            glBufferData(GL_ARRAY_BUFFER, vertexColors.size() * sizeof(glm::vec3), &vertexColors[0], GL_STATIC_DRAW);
+        }
 
         ImGui::End();
 
