@@ -6,6 +6,7 @@
 #include <CGAL/Polyhedron_3.h>
 #include <CGAL/Heat_method_3/Surface_mesh_geodesic_distances_3.h>
 #include <CGAL/Surface_mesh_shortest_path.h>
+#include <CGAL/boost/graph/dijkstra_shortest_paths.h>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_glfw.h"
@@ -24,8 +25,8 @@ typedef boost::graph_traits<SurfaceMesh>::vertex_descriptor VertexDescriptor;
 typedef SurfaceMesh::Property_map<VertexDescriptor, double> VertexDistanceMap;
 typedef CGAL::Heat_method_3::Surface_mesh_geodesic_distances_3<SurfaceMesh> HeatMethod;
 
-typedef CGAL::Surface_mesh_shortest_path_traits<K, SurfaceMesh> Traits;
-typedef CGAL::Surface_mesh_shortest_path<Traits> Surface_mesh_shortest_path;
+typedef std::map<VertexDescriptor, int> VertexIndexMap;
+typedef boost::associative_property_map<VertexIndexMap> VertexIdPropertyMap;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
@@ -100,27 +101,41 @@ std::vector<SurfaceMesh::Vertex_index> samplePoints(SurfaceMesh* surface) {
 }
 
 std::vector<SurfaceMesh::Vertex_index> createNeighbourhoods(SurfaceMesh* surface, std::vector<SurfaceMesh::Vertex_index> sampling) {
-    Surface_mesh_shortest_path shortestPaths(*surface);
-    shortestPaths.add_source_points(sampling.begin(), sampling.end());
+    std::vector<std::pair<float, SurfaceMesh::Vertex_index>> closestSamplePoint(surface->num_vertices(), std::pair<float, SurfaceMesh::Vertex_index>(INFINITY, SurfaceMesh::Vertex_index(-1)));
 
-    std::vector<SurfaceMesh::Vertex_index> res(surface->num_vertices());
+    for (auto s : sampling) {
+        // Associate indices to the vertices
+        VertexIndexMap vertex_id_map;
+        VertexIdPropertyMap vertex_index_pmap(vertex_id_map);
+        int index = 0;
+        for(VertexDescriptor vd : surface->vertices())
+            vertex_id_map[vd] = index++;
 
-    for (auto v : surface->vertices()) {
-        auto i = v.idx();
-        auto loc = *(shortestPaths.shortest_distance_to_source_points(v).second);
-        auto f = loc.first;
-        auto bc = loc.second;
+        // Dijkstra's shortest path needs property maps for the predecessor and distance
+        // We first declare a vector
+        std::vector<VertexDescriptor> predecessor(surface->num_vertices());
+        // and then turn it into a property map
+        boost::iterator_property_map<std::vector<VertexDescriptor>::iterator, VertexIdPropertyMap>
+                predecessor_pmap(predecessor.begin(), vertex_index_pmap);
+        std::vector<double> distance(surface->num_vertices());
+        boost::iterator_property_map<std::vector<double>::iterator, VertexIdPropertyMap>
+                distance_pmap(distance.begin(), vertex_index_pmap);
 
-        auto h = surface->halfedge(f);
-        if (bc[0] >= bc[1] && bc[0] >= bc[2]) {
-            res.at(i) = surface->source(h);
-        } else if (bc[1] >= bc[2]) {
-            res.at(i) = surface->target(h);
-        } else {
-            res.at(i) = surface->target(surface->next(h));
+        boost::dijkstra_shortest_paths(*surface, (VertexDescriptor)s,
+                                       distance_map(distance_pmap)
+                                               .predecessor_map(predecessor_pmap)
+                                               .vertex_index_map(vertex_index_pmap));
+
+        for (auto v : surface->vertices()) {
+            float d = get(distance_pmap, v);
+            if (d < closestSamplePoint.at(v.idx()).first) {
+                closestSamplePoint.at(v.idx()) = std::pair<float, SurfaceMesh::Vertex_index>(d, s);
+            }
         }
     }
 
+    std::vector<SurfaceMesh::Vertex_index> res;
+    std::transform(closestSamplePoint.begin(), closestSamplePoint.end(), std::back_inserter(res), [](auto p) { return p.second; });
     return res;
 }
 
