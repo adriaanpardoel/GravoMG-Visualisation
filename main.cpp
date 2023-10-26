@@ -662,6 +662,34 @@ int main()
 
         ImGui::End();
 
+        ImGui::Begin("Prolongation", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
+        ImGui::SetWindowPos(ImVec2(screenWidth - 300 - 10, 10));
+        ImGui::SetWindowSize(ImVec2(300, 120));
+
+        if (useBarycentricCoords) {
+            ImGui::Text("Prolongation:");
+            ImGui::Text("Barycentric coordinates in triangle");
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Text("v1: %f", barycentricCoords.x);
+            ImGui::Text("v2: %f", barycentricCoords.y);
+            ImGui::Text("v3: %f", barycentricCoords.z);
+        } else if (useEdgeCoords) {
+            ImGui::Text("Prolongation:");
+            ImGui::Text("Barycentric coordinates on edge");
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Text("v1: %f", edgeCoordsW1);
+            ImGui::Text("v2: %f", edgeCoordsW2);
+        } else {
+            ImGui::Text("Prolongation:");
+            ImGui::Text("Inverse distance weights");
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ImGui::Text("v1: %f", invDistWeights.x);
+            ImGui::Text("v2: %f", invDistWeights.y);
+            ImGui::Text("v3: %f", invDistWeights.z);
+        }
+
+        ImGui::End();
+
         // input
         // -----
         processInput(window);
