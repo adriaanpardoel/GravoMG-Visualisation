@@ -47,6 +47,7 @@ GLfloat *vertices = NULL;
 GLuint *edges = NULL;
 GLfloat *coarseVertices = NULL;
 GLuint *coarseEdges = NULL;
+GLuint *candidateEdges = NULL;
 
 // camera
 Camera camera(glm::vec3(0.0f, 0.0f, 2.0f));
@@ -63,6 +64,27 @@ glm::vec2 rotationAnglesDrag;
 // user settings
 static float phi = 0.125f;
 static float prevPhi = 0.0f;
+
+CGAL::SM_Vertex_index selectedPoint = CGAL::SM_Vertex_index(0);
+std::set<std::set<SurfaceMesh::Vertex_index>> coarseTriangles;
+
+
+glm::vec3 selectedPointProjection;
+
+bool useBarycentricCoords;
+std::vector<SurfaceMesh::Vertex_index> barycentricPoints;
+glm::vec3 barycentricCoords;
+
+bool useEdgeCoords;
+std::set<SurfaceMesh::Vertex_index> coordsEdge;
+float edgeCoordsW1, edgeCoordsW2;
+
+bool useInvDistWeights;
+std::vector<SurfaceMesh::Vertex_index> threeClosestPoints;
+glm::vec3 invDistWeights;
+
+SurfaceMesh::Vertex_index coarsePoint;
+
 
 std::vector<SurfaceMesh::Vertex_index> samplePoints(SurfaceMesh* surface) {
     float sumEdgeLengths = 0.0f;
@@ -139,12 +161,31 @@ std::vector<SurfaceMesh::Vertex_index> createNeighbourhoods(SurfaceMesh* surface
     return res;
 }
 
+glm::vec3 toVec3(CGAL::Point_3<CGAL::Epick> p) {
+    return {p.x(), p.y(), p.z()};
+}
+
 SurfaceMesh constructCoarserLevel(SurfaceMesh &surface, std::vector<SurfaceMesh::Vertex_index> &sampling, std::vector<SurfaceMesh::Vertex_index> &neighbourhoods) {
     SurfaceMesh res;
 
     for (auto v : sampling) {
-        res.add_vertex(surface.point(v));
+        glm::vec3 neighbourhoodSumPoints(0);
+        int neighbourhoodNPoints = 0;
+
+        int i = 0;
+        for (auto p : neighbourhoods) {
+            if (p == v) {
+                neighbourhoodSumPoints += toVec3(surface.point(SurfaceMesh::Vertex_index(i)));
+                neighbourhoodNPoints++;
+            }
+            i++;
+        }
+
+        auto mean = neighbourhoodSumPoints / (float)neighbourhoodNPoints;
+        res.add_vertex(CGAL::Point_3<CGAL::Epick>(mean.x, mean.y, mean.z));
     }
+
+    std::vector<std::set<SurfaceMesh::Vertex_index>> neighboursList(res.num_vertices());
 
     for (auto e : surface.edges()) {
         // if endpoints of e are in different neighbourhoods, then create edge in res between those neighbourhoods
@@ -158,10 +199,66 @@ SurfaceMesh constructCoarserLevel(SurfaceMesh &surface, std::vector<SurfaceMesh:
             auto newFromIdx = std::distance(sampling.begin(), std::find(sampling.begin(), sampling.end(), neighbourhoodFrom));
             auto newToIdx = std::distance(sampling.begin(), std::find(sampling.begin(), sampling.end(), neighbourhoodTo));
             res.add_edge(*(res.vertices_begin() + newFromIdx), *(res.vertices_begin() + newToIdx));
+
+            neighboursList.at(newFromIdx).insert((SurfaceMesh::Vertex_index)newToIdx);
+            neighboursList.at(newToIdx).insert((SurfaceMesh::Vertex_index)newFromIdx);
+        }
+    }
+
+    coarseTriangles.clear();
+
+    for (auto v1 : res.vertices()) {
+        for (auto v2 : neighboursList.at(v1)) {
+            for (auto v3 : neighboursList.at(v2)) {
+                if (std::find(neighboursList.at(v3).begin(), neighboursList.at(v3).end(), v1) != neighboursList.at(v3).end()) {
+                    std::set<SurfaceMesh::Vertex_index> triangle;
+                    triangle.insert(v1);
+                    triangle.insert(v2);
+                    triangle.insert(v3);
+                    coarseTriangles.insert(triangle);
+                }
+            }
         }
     }
 
     return res;
+}
+
+float inTriangle(SurfaceMesh mesh, glm::vec3 p, std::vector<CGAL::SM_Vertex_index> tri, glm::vec3& pProjected, glm::vec3& bary, std::map<CGAL::SM_Vertex_index, float>& insideEdge) {
+    auto v1 = toVec3(mesh.point(tri.at(0)));
+    auto v2 = toVec3(mesh.point(tri.at(1)));
+    auto v3 = toVec3(mesh.point(tri.at(2)));
+    auto v1ToP = p - v1;
+    auto e12 = v2 - v1;
+    auto e13 = v3 - v1;
+    auto triNormal = glm::normalize(glm::cross(e12, e13));
+
+    float distToTriangle = glm::dot(v1ToP, triNormal);
+    pProjected = p - distToTriangle * triNormal;
+
+    float doubleArea = glm::dot(glm::cross(e12, e13), triNormal);
+    bary.x = glm::dot(glm::cross(v3 - v2, pProjected - v2), triNormal) / doubleArea;
+    bary.y = glm::dot(glm::cross(v1 - v3, pProjected - v3), triNormal) / doubleArea;
+    bary.z = 1.0f - bary.x - bary.y;
+
+    if (insideEdge.find(tri.at(1)) == insideEdge.end()) {
+        insideEdge[tri.at(1)] = glm::length(v1ToP - glm::dot(v1ToP, e12) * e12);
+    }
+    if (insideEdge.find(tri.at(2)) == insideEdge.end()) {
+        insideEdge[tri.at(2)] = glm::length(v1ToP - glm::dot(v1ToP, e13) * e13);
+    }
+    if (bary.x < 0.0f || bary.y < 0.0f) {
+        insideEdge[tri.at(1)] = -1.0f;
+    }
+    if (bary.x < 0.0f || bary.z < 0.0f) {
+        insideEdge[tri.at(2)] = -1.0f;
+    }
+
+    if (bary.x >= 0 && bary.y >= 0 && bary.z >= 0) {
+        return abs(distToTriangle);
+    }
+
+    return -1.0f;
 }
 
 int main()
@@ -261,7 +358,7 @@ int main()
         edges[i * 2 + 1] = surface.target(h).idx();
     }
 
-    unsigned int vertexArray, vertexBuffer, colorBuffer, edgeBuffer, coarseVertexArray, coarseVertexBuffer, coarseColorBuffer, coarseEdgeBuffer;
+    unsigned int vertexArray, vertexBuffer, colorBuffer, edgeBuffer, coarseVertexArray, coarseVertexBuffer, coarseColorBuffer, coarseEdgeBuffer, coarseCandidateEdgeBuffer, finalTriangleBuffer;
     glGenVertexArrays(1, &vertexArray);
     glGenBuffers(1, &vertexBuffer);
     glGenBuffers(1, &colorBuffer);
@@ -270,6 +367,8 @@ int main()
     glGenBuffers(1, &coarseVertexBuffer);
     glGenBuffers(1, &coarseColorBuffer);
     glGenBuffers(1, &coarseEdgeBuffer);
+    glGenBuffers(1, &coarseCandidateEdgeBuffer);
+    glGenBuffers(1, &finalTriangleBuffer);
 
     // bind the Vertex Array Object first, then bind and set vertex buffer(s), and then configure vertex attributes(s).
     glBindVertexArray(vertexArray);
@@ -293,6 +392,7 @@ int main()
     std::vector<CGAL::SM_Vertex_index> sampling;
     std::vector<CGAL::SM_Vertex_index> neighbourhoods;
     SurfaceMesh coarserLevel;
+    std::set<std::set<CGAL::SM_Vertex_index>> triEdges;
 
     // render loop
     // -----------
@@ -314,12 +414,148 @@ int main()
             neighbourhoods = createNeighbourhoods(&surface, sampling);
             coarserLevel = constructCoarserLevel(surface, sampling, neighbourhoods);
 
-            std::cout << "#vertices = " << coarserLevel.num_vertices() << std::endl;
-            std::cout << "#edges = " << coarserLevel.num_edges() << std::endl;
+            // For selected fine point
+            auto closestCoarsePoint = neighbourhoods.at(selectedPoint);
+            auto coarserLevelIdx = (SurfaceMesh::Vertex_index) std::distance(sampling.begin(), std::find(sampling.begin(), sampling.end(), closestCoarsePoint));
+            coarsePoint = coarserLevelIdx;
+            std::vector<std::set<SurfaceMesh::Vertex_index>> candidateTriangles;
+            std::copy_if(coarseTriangles.begin(), coarseTriangles.end(), std::back_inserter(candidateTriangles), [coarserLevelIdx](auto t) { return std::find(t.begin(), t.end(), coarserLevelIdx) != t.end(); });
+            triEdges = std::accumulate(candidateTriangles.begin(), candidateTriangles.end(), std::set<std::set<SurfaceMesh::Vertex_index>>(), [](auto acc, auto t) {
+                std::set<SurfaceMesh::Vertex_index> e0, e1, e2;
+                auto it = t.begin();
+                e0.insert(*it);
+                e1.insert(*it);
+                it++;
+                e1.insert(*it);
+                e2.insert(*it);
+                it++;
+                e2.insert(*it);
+                e0.insert(*it);
+                acc.insert(e0);
+                acc.insert(e1);
+                acc.insert(e2);
+                return acc;
+            });
+
+            float minDist = INFINITY;
+            std::vector<SurfaceMesh::Vertex_index> minTriangle;
+            bool triangleFound = false;
+            std::map<CGAL::SM_Vertex_index, float> insideEdge;
+
+            for (auto t : candidateTriangles) {
+                auto triangle = std::vector<SurfaceMesh::Vertex_index>(t.begin(), t.end());
+                while (triangle.at(0) != coarserLevelIdx) {
+                    std::rotate(triangle.begin(), triangle.begin() + 1, triangle.end());
+                }
+                glm::vec3 pProjected, bary;
+                auto dist = inTriangle(coarserLevel, toVec3(surface.point(selectedPoint)), triangle, pProjected, bary, insideEdge);
+
+                if (dist >= 0.0f && dist < minDist) {
+                    triangleFound = true;
+                    minDist = dist;
+                    minTriangle = triangle;
+                    selectedPointProjection = pProjected;
+                    barycentricCoords = bary;
+                }
+            }
+
+            useEdgeCoords = false;
+            useInvDistWeights = false;
+            if (triangleFound) {
+                // then we can just use the bary coords
+                std::cout << "barycentric triangle coords" << std::endl;
+
+                useBarycentricCoords = true;
+                barycentricPoints = minTriangle;
+            } else {
+                useBarycentricCoords = false;
+
+                bool edgeFound = false;
+                float minEdgeDist = INFINITY;
+                CGAL::SM_Vertex_index minEdge;
+
+                for (auto element : insideEdge) {
+                    if (element.second >= 0.0f && element.second < minEdgeDist) {
+                        edgeFound = true;
+                        minEdgeDist = element.second;
+                        minEdge = element.first;
+                    }
+                }
+
+                if (edgeFound) {
+                    std::cout << "barycentric edge coords" << std::endl;
+                    useEdgeCoords = true;
+                    // then we can use "bary" coords for edge
+                    auto finePoint = toVec3(surface.point(selectedPoint));
+                    auto coarsePoint = toVec3(coarserLevel.point(coarserLevelIdx));
+                    auto p2 = toVec3(coarserLevel.point(minEdge));
+                    auto e12 = p2 - coarsePoint;
+                    float e12Length = std::max(glm::length(e12), 1e-8f);
+                    float w2 = glm::dot(finePoint - coarsePoint, glm::normalize(e12)) / e12Length;
+                    w2 = std::min(std::max(w2, 0.0f), 1.0f);
+                    float w1 = 1.0f - w2;
+                    // w1, w2 are "bary" coords
+                    coordsEdge = { coarserLevelIdx, minEdge };
+                    edgeCoordsW1 = w1;
+                    edgeCoordsW2 = w2;
+                    selectedPointProjection = w1 * coarsePoint + w2 * p2;
+                } else {
+                    // Use closest three
+                    std::cout << "closest three" << std::endl;
+                    useInvDistWeights = true;
+                    std::vector<SurfaceMesh::Vertex_index> prolongFrom(3);
+                    prolongFrom[0] = coarserLevelIdx;
+
+                    std::vector<std::pair<SurfaceMesh::Vertex_index, float>> pointsDistances;
+                    for (auto e : coarserLevel.edges()) {
+                        auto h = coarserLevel.halfedge(e);
+                        SurfaceMesh::Vertex_index neighbourIdx;
+
+                        if (coarserLevel.source(h) == coarserLevelIdx) {
+                            neighbourIdx = coarserLevel.target(h);
+                        } else if (coarserLevel.target(h) == coarserLevelIdx) {
+                            neighbourIdx = coarserLevel.source(h);
+                        } else {
+                            continue;
+                        }
+
+                        if (std::find_if(pointsDistances.begin(), pointsDistances.end(), [&neighbourIdx](auto pair) { return pair.first == neighbourIdx; }) != pointsDistances.end()) {
+                            continue;
+                        }
+
+                        float dist = glm::distance(toVec3(surface.point(selectedPoint)), toVec3(coarserLevel.point(neighbourIdx)));
+                        pointsDistances.push_back({ neighbourIdx, dist });
+                    }
+
+                    std::sort(pointsDistances.begin(), pointsDistances.end(), [](auto lhs, auto rhs) { return rhs.second - lhs.second; });
+                    prolongFrom[1] = pointsDistances.at(0).first;
+                    prolongFrom[2] = pointsDistances.at(1).first;
+
+                    // Compute inverse distance weights
+                    double sumWeight = 0.;
+                    std::vector<double> weights(3);
+                    for (int j = 0; j < 3; ++j) {
+                        float dist = glm::distance(toVec3(surface.point(selectedPoint)), toVec3(coarserLevel.point(prolongFrom.at(j))));
+                        weights[j] = 1. / std::max(1e-8f, dist);
+                        sumWeight += weights[j];
+                    }
+                    for (int j = 0; j < weights.size(); ++j) {
+                        weights[j] = weights[j] / sumWeight;
+                    }
+
+                    threeClosestPoints = prolongFrom;
+                    invDistWeights = glm::vec3(weights[0], weights[1], weights[2]);
+                }
+            }
+            std::cout << "useBarycentricCoords = " << useBarycentricCoords << std::endl;
 
             for (auto vertexIndex : surface.vertices()) {
                 auto i = vertexIndex.idx();
                 vertexColorsLeft.at(i) = contains(sampling, vertexIndex) ? glm::vec3(1, 1, 0) : glm::vec3(0);
+
+                if (i == selectedPoint) {
+                    vertexColorsLeft.at(i) = glm::vec3(1.0f, 0.06f, 0.94f);
+                }
 
                 int neighbourhood = neighbourhoods.at(i).idx();
                 vertexColorsRight.at(i) = glm::vec3(((neighbourhood * 3) % 255) / 255.0f, ((neighbourhood * 5) % 255) / 255.0f, ((neighbourhood * 7) % 255) / 255.0f);
@@ -327,8 +563,9 @@ int main()
 
             // set up vertex data (and buffer(s)) and configure vertex attributes
             // ------------------------------------------------------------------
-            coarseVertices = new float[coarserLevel.num_vertices() * 3];
-            coarseEdges = new uint[coarserLevel.num_edges() * 2];
+            coarseVertices = new float[(coarserLevel.num_vertices() + 1) * 3];
+            coarseEdges = new uint[(coarserLevel.num_edges() + 3) * 2];
+            candidateEdges = new uint[triEdges.size() * 2];
 
             coarseVertexColors = std::vector<glm::vec3>(coarserLevel.num_vertices());
 
@@ -340,7 +577,18 @@ int main()
                 coarseVertices[i*3 + 1] = (float) p.y();
                 coarseVertices[i*3 + 2] = (float) p.z();
 
-                coarseVertexColors.at(i) = glm::vec3((((int)pow(i, 3)) % 255) / 255.0f, (((int)pow(i, 4)) % 255) / 255.0f, (((int)pow(i, 5)) % 255) / 255.0f);
+//                coarseVertexColors.at(i) = glm::vec3((((int)pow(i, 3)) % 255) / 255.0f, (((int)pow(i, 4)) % 255) / 255.0f, (((int)pow(i, 5)) % 255) / 255.0f);
+            }
+
+            if (useBarycentricCoords || useEdgeCoords) {
+                coarseVertices[coarserLevel.num_vertices() * 3]     = selectedPointProjection.x;
+                coarseVertices[coarserLevel.num_vertices() * 3 + 1] = selectedPointProjection.y;
+                coarseVertices[coarserLevel.num_vertices() * 3 + 2] = selectedPointProjection.z;
+            } else if (useInvDistWeights) {
+                auto p = surface.point(selectedPoint);
+                coarseVertices[coarserLevel.num_vertices() * 3]     = p.x();
+                coarseVertices[coarserLevel.num_vertices() * 3 + 1] = p.y();
+                coarseVertices[coarserLevel.num_vertices() * 3 + 2] = p.z();
             }
 
             for (auto edgeIndex : coarserLevel.edges()) {
@@ -351,11 +599,32 @@ int main()
                 coarseEdges[i * 2 + 1] = coarserLevel.target(h).idx();
             }
 
+            if (useBarycentricCoords) {
+                for (int i = 0; i < 3; i++) {
+                    coarseEdges[(coarserLevel.num_edges() + i) * 2]     = coarserLevel.num_vertices(); // selected point projection
+                    coarseEdges[(coarserLevel.num_edges() + i) * 2 + 1] = barycentricPoints.at(i);
+                }
+            } else if (useInvDistWeights) {
+                for (int i = 0; i < 3; i++) {
+                    coarseEdges[(coarserLevel.num_edges() + i) * 2]     = coarserLevel.num_vertices(); // selected point
+                    coarseEdges[(coarserLevel.num_edges() + i) * 2 + 1] = threeClosestPoints.at(i);
+                }
+            }
+
+            int candidateEdgeIndex = 0;
+            for (auto e : triEdges) {
+                auto i = candidateEdgeIndex++;
+
+                auto it = e.begin();
+                candidateEdges[i * 2]     = (*it++).idx();
+                candidateEdges[i * 2 + 1] = (*it).idx();
+            }
+
             // bind the Vertex Array Object first, then bind and set vertex buffer(s), and then configure vertex attributes(s).
             glBindVertexArray(coarseVertexArray);
 
             glBindBuffer(GL_ARRAY_BUFFER, coarseVertexBuffer);
-            glBufferData(GL_ARRAY_BUFFER, 3 * coarserLevel.num_vertices() * sizeof(GLfloat), coarseVertices, GL_STATIC_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, 3 * (coarserLevel.num_vertices() + 1) * sizeof(GLfloat), coarseVertices, GL_STATIC_DRAW);
 
             glBindBuffer(GL_ARRAY_BUFFER, coarseColorBuffer);
             glBufferData(GL_ARRAY_BUFFER, coarseVertexColors.size() * sizeof(glm::vec3), &coarseVertexColors[0], GL_STATIC_DRAW);
@@ -371,7 +640,16 @@ int main()
             glEnableVertexAttribArray(1);
 
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseEdgeBuffer);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, 2 * coarserLevel.num_edges() * sizeof(GLuint), coarseEdges, GL_STATIC_DRAW);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, 2 * (coarserLevel.num_edges() + 3) * sizeof(GLuint), coarseEdges, GL_STATIC_DRAW);
+
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseCandidateEdgeBuffer);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, 2 * triEdges.size() * sizeof(GLuint), candidateEdges, GL_STATIC_DRAW);
+
+            std::vector<int> finalTriangle;
+            std::transform(barycentricPoints.begin(), barycentricPoints.end(), std::back_inserter(finalTriangle), [](auto p) { return p.idx(); });
+
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, finalTriangleBuffer);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, 3 * sizeof(GLuint), &finalTriangle[0], GL_STATIC_DRAW);
         }
 
         ImGui::End();
@@ -402,7 +680,7 @@ int main()
 
         // render
         // ------
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glViewport(0, 0, vpWidth, vpHeight);
@@ -455,10 +733,62 @@ int main()
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseEdgeBuffer);
         glDrawElements(GL_LINES, 2 * coarserLevel.num_edges(), GL_UNSIGNED_INT, 0);
 
+        // draw candidate edges
+        ourShader.setBool("useUniformColor", true);
+        ourShader.setVec3("uColor", glm::vec3(1, 1, 0));
+        glDisableVertexAttribArray(1);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseCandidateEdgeBuffer);
+        glDrawElements(GL_LINES, 2 * triEdges.size(), GL_UNSIGNED_INT, 0);
+
+        if (useBarycentricCoords) {
+            ourShader.setVec3("uColor", glm::vec3(0, 0.8f, 1));
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, finalTriangleBuffer);
+            glDrawElements(GL_LINE_LOOP, 3, GL_UNSIGNED_INT, 0);
+        } else if (useEdgeCoords) {
+            int coordsEdgeIndex = -1;
+            for (auto edgeIndex : coarserLevel.edges()) {
+                auto i = edgeIndex.idx();
+                auto h = coarserLevel.halfedge(edgeIndex);
+
+                if (std::set<SurfaceMesh::Vertex_index>({ coarserLevel.source(h), coarserLevel.target(h) }) == coordsEdge) {
+                    coordsEdgeIndex = edgeIndex;
+                    break;
+                }
+            }
+
+            ourShader.setVec3("uColor", glm::vec3(1, 0, 0));
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseEdgeBuffer);
+            glDrawElements(GL_LINES, 2, GL_UNSIGNED_INT, (void*) (coordsEdgeIndex * 2 * sizeof(GLuint)));
+        }
+
+        if (useBarycentricCoords || useInvDistWeights) {
+            ourShader.setVec3("uColor", glm::vec3(1, 0, 0));
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coarseEdgeBuffer);
+            glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) (coarserLevel.num_edges() * 2 * sizeof(GLuint)));
+        }
+
+        if (useBarycentricCoords || useEdgeCoords) {
+            // draw projected point
+            ourShader.setVec3("uColor", glm::vec3(0.6f, 0, 0.8f));
+            glBindVertexArray(coarseVertexArray);
+            glDrawArrays(GL_POINTS, coarserLevel.num_vertices(), 1);
+
+            // draw coarse point
+            ourShader.setVec3("uColor", glm::vec3(1, 1, 0));
+            glBindVertexArray(coarseVertexArray);
+            glDrawArrays(GL_POINTS, coarsePoint.idx(), 1);
+        }
+
+        // draw selected point
+        ourShader.setVec3("uColor", glm::vec3(1, 0, 1));
+        glBindVertexArray(vertexArray);
+        glDrawArrays(GL_POINTS, selectedPoint.idx(), 1);
+
         // draw vertices
+        ourShader.setBool("useUniformColor", false);
         glEnableVertexAttribArray(1);
         glBindVertexArray(coarseVertexArray);
-        glDrawArrays(GL_POINTS, 0, coarserLevel.num_vertices());
+//        glDrawArrays(GL_POINTS, 0, coarserLevel.num_vertices());
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -475,6 +805,12 @@ int main()
     glDeleteBuffers(1, &vertexBuffer);
     glDeleteBuffers(1, &colorBuffer);
     glDeleteBuffers(1, &edgeBuffer);
+    glDeleteBuffers(1, &coarseVertexArray);
+    glDeleteBuffers(1, &coarseVertexBuffer);
+    glDeleteBuffers(1, &coarseColorBuffer);
+    glDeleteBuffers(1, &coarseEdgeBuffer);
+    glDeleteBuffers(1, &coarseCandidateEdgeBuffer);
+    glDeleteBuffers(1, &finalTriangleBuffer);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
