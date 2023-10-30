@@ -262,6 +262,39 @@ static void bufferProlongationData(Prolongation prolongation, Eigen::MatrixXd &f
     glBufferData(GL_ARRAY_BUFFER, prolongationEdges.size() * 2 * sizeof(GLuint), &flattenedEdges[0], GL_STATIC_DRAW);
 }
 
+bool showProlongation(Prolongation prolongation) {
+    std::vector<int> candidates;
+
+    if (prolongation == fallback) {
+        for (int v = 0; v < hierarchyProlongationFallback[0].size(); v++) {
+            if (hierarchyProlongationFallback[0][v]) {
+                candidates.push_back(v);
+            }
+        }
+    } else {
+        for (int v = 0; v < hierarchyProlongation[0].rows(); v++) {
+            Eigen::RowVectorXd weightsRow = hierarchyProlongation[0].row(v);
+            int nElements = (weightsRow.array() > 0.0).cast<int>().sum();
+            if ((prolongation == barycentricTriangle && nElements == 3) ||
+                    (prolongation == barycentricEdge && nElements < 3)) {
+                candidates.push_back(v);
+            }
+        }
+    }
+
+    if (candidates.empty()) {
+        return false;
+    }
+
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, candidates.size() - 1);
+    int randomCandidate = candidates.at(dis(gen));
+
+    selectedPoint = SurfaceMesh::Vertex_index(randomCandidate);
+    return true;
+}
+
 int main()
 {
     // glfw: initialize and configure
@@ -326,7 +359,7 @@ int main()
 
     std::ifstream in("meshes/cactus.off");
     in >> mesh;
-    CGAL::copy_face_graph( mesh, surface);
+    CGAL::copy_face_graph(mesh, surface);
 
     auto nVertices = surface.num_vertices();
     auto nEdges = surface.num_edges();
@@ -454,6 +487,45 @@ int main()
 
         if (prolongation != barycentricEdge) {
             ImGui::Text("v3: %f", prolongationWeights[2]);
+        }
+
+        ImGui::End();
+
+        ImGui::Begin("Show prolongation", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
+        ImGui::SetWindowPos(ImVec2(screenWidth - 620, 10));
+        ImGui::SetWindowSize(ImVec2(300, 120));
+
+        bool prolongationFound = true;
+
+        if (ImGui::Button("Show barycentric triangle")) {
+            prolongationFound = showProlongation(barycentricTriangle);
+        }
+        if (ImGui::Button("Show barycentric edge")) {
+            prolongationFound = showProlongation(barycentricEdge);
+        }
+        if (ImGui::Button("Show fallback")) {
+            prolongationFound = showProlongation(fallback);
+        }
+
+        if (!prolongationFound) {
+            ImGui::OpenPopup("Not found");
+        }
+
+        // Always center this window when appearing
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+        if (ImGui::BeginPopupModal("Not found", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Unfortunately, a prolongation of that\ntype could not be found :(");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (ImGui::Button("OK", ImVec2(-1.0f, 0.0f))) { ImGui::CloseCurrentPopup(); }
+            ImGui::SetItemDefaultFocus();
+            ImGui::EndPopup();
         }
 
         ImGui::End();
