@@ -51,8 +51,8 @@ glm::vec2 rotationAnglesDrag;
 static float phi = 0.125f;
 static float prevPhi = 0.0f;
 
-CGAL::SM_Vertex_index selectedPoint = CGAL::SM_Vertex_index(0);
-CGAL::SM_Vertex_index prevSelectedPoint = CGAL::SM_Vertex_index(0);
+int selectedPoint = 0;
+int prevSelectedPoint = 0;
 
 Eigen::RowVectorXd::Index coarsePoint;
 
@@ -69,11 +69,22 @@ std::vector<std::vector<int>> hierarchySampling;
 std::vector<Eigen::SparseMatrix<double>> hierarchyProlongation;
 std::vector<std::vector<bool>> hierarchyProlongationFallback;
 
-Eigen::MatrixXd originalPositions;
-Eigen::MatrixXi originalNeighbours;
-
 std::vector<int> prolongationVertices;
 std::vector<double> prolongationWeights;
+
+int displayLevel = 0;
+
+
+enum Prolongation {
+    barycentricTriangle,
+    barycentricEdge,
+    fallback,
+};
+
+
+std::set<std::vector<int>> candidateEdges;
+Prolongation prolongation;
+std::vector<std::string> levelLabels;
 
 
 // vertex buffer: [n fine vertices, m coarse vertices, 1 projected vertex] x 3d
@@ -84,17 +95,6 @@ std::vector<double> prolongationWeights;
 
 unsigned int vertexArray, vertexBuffer, samplingBuffer, colorBuffer, edgeBuffer, prolongationEdgeBuffer;
 
-
-enum Prolongation {
-    barycentricTriangle,
-    barycentricEdge,
-    fallback,
-};
-
-
-glm::vec3 toVec3(CGAL::Point_3<CGAL::Epick> p) {
-    return {p.x(), p.y(), p.z()};
-}
 
 void constructHierarchy(SurfaceMesh &surface) {
     Eigen::MatrixXd positions(surface.num_vertices(), 3);
@@ -126,7 +126,7 @@ void constructHierarchy(SurfaceMesh &surface) {
 
     GravoMG::MultigridSolver solver(positions, neighbours, mass);
     solver.debug = true;
-    solver.lowBound = 0;
+    solver.lowBound = 3;
     solver.ratio = 1.0f / phi;
     solver.buildHierarchy();
 
@@ -137,8 +137,9 @@ void constructHierarchy(SurfaceMesh &surface) {
     hierarchyProlongation = solver.U;
     hierarchyProlongationFallback = solver.prolongationFallback;
 
-    originalPositions = positions;
-    originalNeighbours = neighbours;
+    hierarchyVertices.insert(hierarchyVertices.begin(), positions);
+    hierarchyTriangles.insert(hierarchyTriangles.begin(), std::vector<std::vector<int>>());
+    hierarchyNeighbours.insert(hierarchyNeighbours.begin(), neighbours);
 }
 
 static int countEdges(Eigen::MatrixXi &neighbours) {
@@ -266,17 +267,18 @@ bool showProlongation(Prolongation prolongation) {
     std::vector<int> candidates;
 
     if (prolongation == fallback) {
-        for (int v = 0; v < hierarchyProlongationFallback[0].size(); v++) {
-            if (hierarchyProlongationFallback[0][v]) {
+        for (int v = 0; v < hierarchyProlongationFallback[displayLevel].size(); v++) {
+            if (hierarchyProlongationFallback[displayLevel][v]) {
                 candidates.push_back(v);
             }
         }
     } else {
-        for (int v = 0; v < hierarchyProlongation[0].rows(); v++) {
-            Eigen::RowVectorXd weightsRow = hierarchyProlongation[0].row(v);
+        for (int v = 0; v < hierarchyProlongation[displayLevel].rows(); v++) {
+            Eigen::RowVectorXd weightsRow = hierarchyProlongation[displayLevel].row(v);
             int nElements = (weightsRow.array() > 0.0).cast<int>().sum();
-            if ((prolongation == barycentricTriangle && nElements == 3) ||
-                    (prolongation == barycentricEdge && nElements < 3)) {
+            if (!hierarchyProlongationFallback[displayLevel][v] &&
+                    ((prolongation == barycentricTriangle && nElements == 3) ||
+                    (prolongation == barycentricEdge && nElements < 3))) {
                 candidates.push_back(v);
             }
         }
@@ -289,10 +291,112 @@ bool showProlongation(Prolongation prolongation) {
     static std::random_device rd;
     static std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, candidates.size() - 1);
-    int randomCandidate = candidates.at(dis(gen));
+    selectedPoint = candidates.at(dis(gen));
 
-    selectedPoint = SurfaceMesh::Vertex_index(randomCandidate);
     return true;
+}
+
+static Eigen::Vector3f rainbowColormap(double ratio)
+{
+    //we want to normalize ratio so that it fits in to 6 regions
+    //where each region is 256 units long
+    int normalized = int(ratio * 256 * 6);
+
+    //find the region for this position
+    int region = normalized / 256;
+
+    //find the distance to the start of the closest region
+    int x = normalized % 256;
+
+    int r = 0, g = 0, b = 0;
+    switch (region)
+    {
+        case 0: r = 255; g = 0;   b = 0;   g += x; break;
+        case 1: r = 255; g = 255; b = 0;   r -= x; break;
+        case 2: r = 0;   g = 255; b = 0;   b += x; break;
+        case 3: r = 0;   g = 255; b = 255; g -= x; break;
+        case 4: r = 0;   g = 0;   b = 255; r += x; break;
+        case 5: r = 255; g = 0;   b = 255; b -= x; break;
+    }
+
+    return Eigen::Vector3f(r, g, b) / 255.0f;
+}
+
+void updateBuffers(bool updateHierarchyBuffers, bool updateProlongationBuffers) {
+    if (updateHierarchyBuffers) {
+        selectedPoint = 0;
+    }
+
+    std::vector<Eigen::Vector3f> neighbourhoodColors(hierarchyVertices[displayLevel + 1].rows());
+    for (int neighbourhood = 0; neighbourhood < hierarchyVertices[displayLevel + 1].rows(); neighbourhood++) {
+        neighbourhoodColors[neighbourhood] = rainbowColormap((float)neighbourhood / hierarchyVertices[displayLevel + 1].rows());
+    }
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(neighbourhoodColors.begin(), neighbourhoodColors.end(), g);
+
+    Eigen::VectorXi neighbourhoods(hierarchyProlongation[displayLevel].rows());
+    for (int v = 0; v < hierarchyProlongation[displayLevel].rows(); v++) {
+        Eigen::RowVectorXd weightsRow = hierarchyProlongation[displayLevel].row(v);
+        Eigen::RowVectorXd::Index maxIndex;
+        weightsRow.maxCoeff(&maxIndex);
+        neighbourhoods[v] = maxIndex;
+    }
+
+    coarsePoint = neighbourhoods[selectedPoint];
+
+    Eigen::RowVectorXd weightsRow = hierarchyProlongation[displayLevel].row(selectedPoint);
+
+    int nElements = (weightsRow.array() > 0.0).cast<int>().sum();
+
+    if (hierarchyProlongationFallback[displayLevel][selectedPoint]) {
+        prolongation = fallback;
+    } else if (nElements == 3) {
+        prolongation = barycentricTriangle;
+    } else {
+        prolongation = barycentricEdge;
+    }
+
+    prolongationVertices.clear();
+    prolongationWeights.clear();
+
+    for (int j = 0; j < hierarchyProlongation[displayLevel].cols(); j++) {
+        if (weightsRow[j] > 0) {
+            prolongationVertices.push_back(j);
+            prolongationWeights.push_back(weightsRow[j]);
+        }
+    }
+
+    if (nElements == 1) {
+        prolongationVertices[1] = prolongationVertices[0];
+        prolongationWeights[1] = 0;
+    }
+
+    auto contains = [](auto v, auto x) { return std::find(v.begin(), v.end(), x) != v.end(); };
+
+    candidateEdges.clear();
+    for (auto t : hierarchyTriangles[displayLevel + 1]) {
+        if (!contains(t, coarsePoint)) continue;
+
+        candidateEdges.insert({ std::min(t[0], t[1]), std::max(t[0], t[1]) });
+        candidateEdges.insert({ std::min(t[1], t[2]), std::max(t[1], t[2]) });
+        candidateEdges.insert({ std::min(t[2], t[0]), std::max(t[2], t[0]) });
+    }
+
+    Eigen::Vector3d projectedVertexPosition = weightsRow * hierarchyVertices[displayLevel + 1];
+
+    levelLabels.clear();
+    for (int l = 0; l < hierarchyVertices.size() - 1; l++) {
+        std::ostringstream stringStream;
+        stringStream << l << " to " << (l + 1);
+        levelLabels.push_back(stringStream.str());
+    }
+
+    if (updateHierarchyBuffers)
+        bufferHierarchyData(hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], hierarchySampling[displayLevel], neighbourhoods, neighbourhoodColors, hierarchyNeighbours[displayLevel], hierarchyNeighbours[displayLevel + 1]);
+
+    if (updateProlongationBuffers)
+        bufferProlongationData(prolongation, hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], projectedVertexPosition, selectedPoint, candidateEdges, prolongationVertices);
 }
 
 int main()
@@ -374,9 +478,6 @@ int main()
     glGenBuffers(1, &edgeBuffer);
     glGenBuffers(1, &prolongationEdgeBuffer);
 
-    std::set<std::vector<int>> candidateEdges;
-    Prolongation prolongation;
-
     // render loop
     // -----------
     while (!glfwWindowShouldClose(window))
@@ -388,76 +489,38 @@ int main()
 
         ImGui::Begin("Options", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
         ImGui::SetWindowPos(ImVec2(10, 10));
-        ImGui::SetWindowSize(ImVec2(120, 40));
+        ImGui::SetWindowSize(ImVec2(300, 120));
 
         ImGui::DragFloat("phi", &phi, 0.005f);
-        if (!ImGui::IsItemActive() && (phi != prevPhi || selectedPoint != prevSelectedPoint)) {
+        if (!ImGui::IsItemActive() && phi != prevPhi) {
             prevPhi = phi;
-            prevSelectedPoint = selectedPoint;
 
             constructHierarchy(surface);
 
-            std::vector<Eigen::Vector3f> neighbourhoodColors(hierarchyVertices[0].rows());
-            for (int neighbourhood = 0; neighbourhood < hierarchyVertices[0].rows(); neighbourhood++) {
-                neighbourhoodColors[neighbourhood] = Eigen::Vector3f(((neighbourhood * 3) % 255) / 255.0f,
-                                                                     ((neighbourhood * 5) % 255) / 255.0f,
-                                                                     ((neighbourhood * 7) % 255) / 255.0f);
-            }
+            displayLevel = 0;
+            updateBuffers(true, true);
+        }
 
-            Eigen::VectorXi neighbourhoods(hierarchyProlongation[0].rows());
-            for (int v = 0; v < hierarchyProlongation[0].rows(); v++) {
-                Eigen::RowVectorXd weightsRow = hierarchyProlongation[0].row(v);
-                Eigen::RowVectorXd::Index maxIndex;
-                weightsRow.maxCoeff(&maxIndex);
-                neighbourhoods[v] = maxIndex;
-            }
+        if (selectedPoint != prevSelectedPoint) {
+            prevSelectedPoint = selectedPoint;
+            updateBuffers(false, true);
+        }
 
-            coarsePoint = neighbourhoods[selectedPoint];
-
-            Eigen::RowVectorXd weightsRow = hierarchyProlongation[0].row(selectedPoint);
-
-            int nElements = (weightsRow.array() > 0.0).cast<int>().sum();
-
-            if (hierarchyProlongationFallback[0][selectedPoint]) {
-                prolongation = fallback;
-            } else if (nElements == 3) {
-                prolongation = barycentricTriangle;
-            } else {
-                prolongation = barycentricEdge;
-            }
-
-            prolongationVertices.clear();
-            prolongationWeights.clear();
-
-            for (int j = 0; j < hierarchyProlongation[0].cols(); j++) {
-                if (weightsRow[j] > 0) {
-                    prolongationVertices.push_back(j);
-                    prolongationWeights.push_back(weightsRow[j]);
+        if (ImGui::BeginCombo("Level", levelLabels[displayLevel].c_str(), 0))
+        {
+            for (int l = 0; l < hierarchyVertices.size() - 1; l++)
+            {
+                const bool is_selected = (displayLevel == l);
+                if (ImGui::Selectable(levelLabels[l].c_str(), is_selected)) {
+                    displayLevel = l;
+                    updateBuffers(true, true);
                 }
+
+                // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
+                if (is_selected)
+                    ImGui::SetItemDefaultFocus();
             }
-
-            if (nElements == 1) {
-                prolongationVertices[1] = prolongationVertices[0];
-                prolongationWeights[1] = 0;
-            }
-
-            auto contains = [](auto v, auto x) { return std::find(v.begin(), v.end(), x) != v.end(); };
-
-            candidateEdges.clear();
-            for (auto t : hierarchyTriangles[0]) {
-                if (!contains(t, coarsePoint)) continue;
-
-                candidateEdges.insert({ std::min(t[0], t[1]), std::max(t[0], t[1]) });
-                candidateEdges.insert({ std::min(t[1], t[2]), std::max(t[1], t[2]) });
-                candidateEdges.insert({ std::min(t[2], t[0]), std::max(t[2], t[0]) });
-            }
-
-            Eigen::Vector3d projectedVertexPosition = weightsRow * hierarchyVertices[0];
-
-            bufferHierarchyData(originalPositions, hierarchyVertices[0], hierarchySampling[0], neighbourhoods, neighbourhoodColors, originalNeighbours, hierarchyNeighbours[0]);
-            bufferProlongationData(prolongation, originalPositions, hierarchyVertices[0], projectedVertexPosition, selectedPoint, candidateEdges, prolongationVertices);
-
-            samplingShader.setInt("selectedVertex", selectedPoint);
+            ImGui::EndCombo();
         }
 
         ImGui::End();
@@ -554,6 +617,8 @@ int main()
         defaultShader.setMat4("model", model);
         samplingShader.setMat4("model", model);
 
+        samplingShader.setInt("selectedVertex", selectedPoint);
+
         // set point size
         glPointSize(5 * 45 / camera.Zoom);
 
@@ -562,8 +627,8 @@ int main()
         glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        int nFineEdges = countEdges(originalNeighbours);
-        int nCoarseEdges = countEdges(hierarchyNeighbours[0]);
+        int nFineEdges = countEdges(hierarchyNeighbours[displayLevel]);
+        int nCoarseEdges = countEdges(hierarchyNeighbours[displayLevel + 1]);
 
         glBindVertexArray(vertexArray);
         glEnableVertexAttribArray(0);
@@ -581,7 +646,7 @@ int main()
         samplingShader.use();
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
-        glDrawArrays(GL_POINTS, 0, originalPositions.rows());
+        glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
         glDisableVertexAttribArray(1);
 
         // neighbourhoods (middle pane)
@@ -594,7 +659,7 @@ int main()
 
         // draw vertices
         glEnableVertexAttribArray(2);
-        glDrawArrays(GL_POINTS, 0, originalPositions.rows());
+        glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
         glDisableVertexAttribArray(2);
 
         // prolongation (right pane)
@@ -635,16 +700,16 @@ int main()
         if (prolongation != fallback) {
             // draw coarse point
             defaultShader.setVec3("uColor", glm::vec3(1, 1, 0));
-            glDrawArrays(GL_POINTS, originalPositions.rows() + coarsePoint, 1);
+            glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + coarsePoint, 1);
 
             // draw projected point
             defaultShader.setVec3("uColor", glm::vec3(0.6f, 0, 0.8f));
-            glDrawArrays(GL_POINTS, originalPositions.rows() + hierarchyVertices[0].rows(), 1);
+            glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + hierarchyVertices[displayLevel + 1].rows(), 1);
         }
 
         // draw selected point
         defaultShader.setVec3("uColor", glm::vec3(1, 0, 1));
-        glDrawArrays(GL_POINTS, selectedPoint.idx(), 1);
+        glDrawArrays(GL_POINTS, selectedPoint, 1);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -727,17 +792,18 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                     rayCamPos = inverse(model) * glm::vec4(camera.Position.x, camera.Position.y, camera.Position.z, 1.0f);
 
                     float tMin = INFINITY;
-                    SurfaceMesh::Vertex_index vMin;
+                    int vMin;
                     bool intersection = false;
                     int intersections = 0;
 
                     float radius2 = 0.0001f;
 
-                    for (auto v : surface.vertices()) {
+                    for (int v = 0; v < hierarchyVertices[displayLevel].rows(); v++) {
                         float t0, t1; // solutions for t if the ray intersects
 
                         // geometric solution
-                        auto vPos = toVec3(surface.point(v));
+                        auto row = hierarchyVertices[displayLevel].row(v);
+                        glm::vec3 vPos = { row.x(), row.y(), row.z() };
                         glm::vec3 L = vPos - rayCamPos;
                         float tca = glm::dot(L, ray_wor);
                         // if (tca < 0) return false;
