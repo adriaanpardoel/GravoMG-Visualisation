@@ -120,7 +120,7 @@ namespace GravoMG {
 					break;
 			}
 
-			if (samples[k].size() < lowBound) {
+			if (samples[k].size() < lowBound && k > 0) {
 				nearestSource.pop_back();
 				break;
 			}

@@ -76,6 +76,10 @@ set(IMGUI_DIR imgui)
 file(GLOB IMGUI_SOURCES ${IMGUI_DIR}/*.cpp)
 target_sources(GravoMG_Visualisation PUBLIC ${IMGUI_SOURCES})
 
+# NFD
+add_subdirectory(nativefiledialog-extended)
+target_link_libraries(GravoMG_Visualisation PUBLIC nfd)
+
 # GravoMG
 add_subdirectory(gravomg)
 target_link_libraries(GravoMG_Visualisation PUBLIC gravomg)

@@ -4,10 +4,14 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polyhedron_3.h>
+#include <CGAL/Point_set_3.h>
+#include <CGAL/compute_average_spacing.h>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_glfw.h"
 #include "imgui/imgui_impl_opengl3.h"
+
+#include <nfd.h>
 
 #include "learnopengl/shader.h"
 #include "learnopengl/camera.h"
@@ -16,9 +20,11 @@
 
 #include <iostream>
 
+#include "tinydir.h"
+
 typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
 typedef CGAL::Surface_mesh<K::Point_3> SurfaceMesh;
-typedef CGAL::Polyhedron_3<K> Polyhedron;
+typedef CGAL::Point_set_3<K::Point_3> PointSet;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
@@ -86,6 +92,12 @@ std::set<std::vector<int>> candidateEdges;
 Prolongation prolongation;
 std::vector<std::string> levelLabels;
 
+std::vector<std::string> meshFiles;
+std::vector<std::string> meshLabels;
+int selectedMeshFile;
+
+PointSet pointSet;
+
 
 // vertex buffer: [n fine vertices, m coarse vertices, 1 projected vertex] x 3d
 // sampling buffer [n fine points] x 1 bool
@@ -96,28 +108,59 @@ std::vector<std::string> levelLabels;
 unsigned int vertexArray, vertexBuffer, samplingBuffer, colorBuffer, edgeBuffer, prolongationEdgeBuffer;
 
 
-void constructHierarchy(SurfaceMesh &surface) {
-    Eigen::MatrixXd positions(surface.num_vertices(), 3);
-    Eigen::MatrixXi neighbours(surface.num_vertices(), surface.num_vertices());
-    Eigen::SparseMatrix<double> mass(surface.num_vertices(), surface.num_vertices());
+void constructHierarchy() {
+    auto filePath = meshFiles[selectedMeshFile];
+    auto ext = filePath.substr(filePath.find_last_of('.') + 1);
+
+    int nPoints = (ext == "xyz" ? pointSet.size() : surface.num_vertices());
+    Eigen::MatrixXd positions(nPoints, 3);
+    Eigen::MatrixXi neighbours(nPoints, nPoints);
+    Eigen::SparseMatrix<double> mass(nPoints, nPoints);
 
     neighbours.setConstant(-1);
     int maxNeighbours = 0;
 
-    for (auto v : surface.vertices()) {
-        auto p = surface.point(v);
+    if (ext == "xyz") {
+        // point cloud
+        auto averageSpacing = CGAL::compute_average_spacing<CGAL::Parallel_if_available_tag>(pointSet, 10, CGAL::parameters::all_default());
+        float r2 = averageSpacing * averageSpacing;
 
-        positions(v.idx(), 0) = p.x();
-        positions(v.idx(), 1) = p.y();
-        positions(v.idx(), 2) = p.z();
+        int v = 0;
+        for (auto p : pointSet.points()) {
+            positions(v, 0) = p.x();
+            positions(v, 1) = p.y();
+            positions(v, 2) = p.z();
 
-        int col = 0;
-        for (auto outEdge : CGAL::halfedges_around_source(v, surface)) {
-            auto neighbour = surface.target(outEdge);
-            neighbours(v.idx(), col++) = neighbour.idx();
+            int w = 0;
+            int col = 0;
+            for (auto q : pointSet.points()) {
+                float d2 = squared_distance(p, q);
+                if (p != q && d2 <= r2) {
+                    neighbours(v, col++) = w;
+                }
+                w++;
+            }
+
+            maxNeighbours = std::max(maxNeighbours, col);
+            v++;
         }
+    } else {
+        // surface mesh
+        for (auto v : surface.vertices()) {
+            auto p = surface.point(v);
 
-        maxNeighbours = std::max(maxNeighbours, col);
+            positions(v.idx(), 0) = p.x();
+            positions(v.idx(), 1) = p.y();
+            positions(v.idx(), 2) = p.z();
+
+            int col = 0;
+            for (auto outEdge : CGAL::halfedges_around_source(v, surface)) {
+                auto neighbour = surface.target(outEdge);
+                neighbours(v.idx(), col++) = neighbour.idx();
+            }
+
+            maxNeighbours = std::max(maxNeighbours, col);
+        }
     }
 
     neighbours.conservativeResize(neighbours.rows(), maxNeighbours);
@@ -322,6 +365,19 @@ static Eigen::Vector3f rainbowColormap(double ratio)
     return Eigen::Vector3f(r, g, b) / 255.0f;
 }
 
+void addMeshFile(const std::string& filePath) {
+    auto i = std::distance(meshFiles.begin(), std::find(meshFiles.begin(), meshFiles.end(), filePath));
+    if (i < meshFiles.size()) {
+        selectedMeshFile = i;
+        return;
+    }
+
+    std::string fileName = filePath.substr(filePath.find_last_of("/\\") + 1);
+
+    meshFiles.push_back(filePath);
+    meshLabels.push_back(fileName);
+}
+
 void updateBuffers(bool updateHierarchyBuffers, bool updateProlongationBuffers) {
     if (updateHierarchyBuffers) {
         selectedPoint = 0;
@@ -399,6 +455,30 @@ void updateBuffers(bool updateHierarchyBuffers, bool updateProlongationBuffers) 
         bufferProlongationData(prolongation, hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], projectedVertexPosition, selectedPoint, candidateEdges, prolongationVertices);
 }
 
+void loadMeshFromFile(const std::string& filePath) {
+    auto ext = filePath.substr(filePath.find_last_of('.') + 1);
+
+    surface.clear();
+    pointSet.clear();
+    std::ifstream in(filePath);
+
+    if (ext == "off") {
+        CGAL::IO::read_OFF(in, surface);
+    } else if (ext == "obj") {
+        CGAL::IO::read_OBJ(in, surface);
+    } else if (ext == "stl") {
+        CGAL::IO::read_STL(in, surface);
+    } else if (ext == "ply") {
+        CGAL::IO::read_PLY(in, surface);
+    } else if (ext == "ts") {
+        CGAL::IO::read_GOCAD(in, surface);
+    } else if (ext == "xyz") {
+        CGAL::IO::read_XYZ(in, pointSet);
+    } else {
+        std::cout << "Cannot read file: " << filePath << std::endl;
+    }
+}
+
 int main()
 {
     // glfw: initialize and configure
@@ -449,6 +529,28 @@ int main()
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init();
 
+    NFD_Init();
+
+    // Retrieve mesh files
+    tinydir_dir dir;
+    tinydir_open_sorted(&dir, "meshes");
+
+    for (int i = 0; i < dir.n_files; i++)
+    {
+        tinydir_file file;
+        tinydir_readfile_n(&dir, &file, i);
+
+        if (file.is_reg) {
+            meshFiles.push_back(file.path);
+            meshLabels.push_back(file.name);
+        }
+    }
+
+    tinydir_close(&dir);
+
+    auto cactusIndex = std::distance(meshLabels.begin(), std::find(meshLabels.begin(), meshLabels.end(), "cactus.off"));
+    selectedMeshFile = std::max(0, (int) cactusIndex);
+
     // build and compile our shader program
     // ------------------------------------
     Shader defaultShader("shaders/vertex_shader.glsl", "shaders/fragment_shader.glsl");
@@ -457,13 +559,7 @@ int main()
     samplingShader.setVec3("samplingColor", 1, 1, 0);
     samplingShader.setVec3("selectionColor", 1, 0, 1);
 
-    // load mesh from file
-    // -------------------
-    Polyhedron mesh;
-
-    std::ifstream in("meshes/cactus.off");
-    in >> mesh;
-    CGAL::copy_face_graph(mesh, surface);
+    loadMeshFromFile(meshFiles[selectedMeshFile]);
 
     auto nVertices = surface.num_vertices();
     auto nEdges = surface.num_edges();
@@ -495,7 +591,7 @@ int main()
         if (!ImGui::IsItemActive() && phi != prevPhi) {
             prevPhi = phi;
 
-            constructHierarchy(surface);
+            constructHierarchy();
 
             displayLevel = 0;
             updateBuffers(true, true);
@@ -519,6 +615,42 @@ int main()
                 // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
                 if (is_selected)
                     ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        if (ImGui::BeginCombo("Mesh", meshLabels[selectedMeshFile].c_str(), 0))
+        {
+            for (int i = 0; i < meshFiles.size(); i++)
+            {
+                const bool is_selected = (selectedMeshFile == i);
+                if (ImGui::Selectable(meshLabels[i].c_str(), is_selected)) {
+                    selectedMeshFile = i;
+                    loadMeshFromFile(meshFiles[selectedMeshFile]);
+                    constructHierarchy();
+                    displayLevel = 0;
+                    updateBuffers(true, true);
+                }
+
+                // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
+                if (is_selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+
+            if (ImGui::Selectable("Select file...")) {
+                nfdchar_t *outPath;
+                nfdfilteritem_t filterItem[1] = { { "Object files", "obj,off" } };
+                nfdresult_t result = NFD_OpenDialog(&outPath, filterItem, 1, NULL);
+
+                if (result == NFD_OKAY) {
+                    addMeshFile(std::string(outPath));
+
+                    selectedMeshFile = meshFiles.size() - 1;
+                    loadMeshFromFile(meshFiles[selectedMeshFile]);
+                    constructHierarchy();
+                    displayLevel = 0;
+                    updateBuffers(true, true);
+                }
             }
             ImGui::EndCombo();
         }
@@ -729,6 +861,8 @@ int main()
     glDeleteBuffers(1, &edgeBuffer);
     glDeleteBuffers(1, &prolongationEdgeBuffer);
 
+    NFD_Quit();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -869,6 +1003,11 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
 // ----------------------------------------------------------------------
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        return;
+    }
+
     camera.ProcessMouseScroll(static_cast<float>(yoffset));
 }
 
