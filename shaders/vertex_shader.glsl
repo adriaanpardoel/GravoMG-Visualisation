@@ -1,14 +1,14 @@
 #version 330 core
 layout (location = 0) in vec3 aPos;
-layout (location = 2) in vec3 aColor;
+layout (location = 2) in vec4 aColor;
 
-out vec3 ourColor;
+out vec4 ourColor;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
-uniform vec3 uColor;
+uniform vec4 uColor;
 uniform bool useUniformColor;
 
 void main()

@@ -2,7 +2,7 @@
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in int inSampling;
 
-out vec3 ourColor;
+out vec4 ourColor;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -15,5 +15,5 @@ uniform int selectedVertex;
 void main()
 {
    gl_Position = projection * view * model * vec4(aPos, 1.0f);
-   ourColor = gl_VertexID == selectedVertex ? selectionColor : (inSampling == 1 ? samplingColor : vec3(0));
+   ourColor = vec4(gl_VertexID == selectedVertex ? selectionColor : (inSampling == 1 ? samplingColor : vec3(0)), 1.0f);
 }

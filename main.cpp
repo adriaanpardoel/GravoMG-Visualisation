@@ -104,9 +104,47 @@ PointSet pointSet;
 // color buffer: [n fine points] x 3f
 // edge buffer: [n fine edges, m coarse edges] x 2i
 // prolongation edge buffer: [n candidate edges, 3 final triangle edges, 3 barycentric lines] x 2i
+// triangle buffer: [n fine triangles, m coarse triangles] x 3i
 
-unsigned int vertexArray, vertexBuffer, samplingBuffer, colorBuffer, edgeBuffer, prolongationEdgeBuffer;
+unsigned int vertexArray, vertexBuffer, samplingBuffer, colorBuffer, edgeBuffer, prolongationEdgeBuffer, triangleBuffer;
 
+
+static std::vector<std::vector<int>> generateTriangles(Eigen::MatrixXd& positions, Eigen::MatrixXi& neighbours) {
+    std::vector<std::vector<int>> tris;
+    tris.reserve(positions.rows() * neighbours.cols());
+    for (int v1Idx = 0; v1Idx < positions.rows(); ++v1Idx) {
+        int v2Idx, v3Idx;
+        for (int col1 = 0; col1 < neighbours.cols(); col1++) {
+            v2Idx = neighbours(v1Idx, col1);
+            if (v2Idx < 0) break;
+            // We iterate over the indices in order, so if the neighboring idx is lower than the current v1Idx,
+            // it must have been considered before and be part of a triangle.
+            if (v2Idx < v1Idx) continue;
+            for (int col2 = col1 + 1; col2 < neighbours.cols(); col2++) {
+                v3Idx = neighbours(v1Idx, col2);
+                if (v3Idx < 0) break;
+                if (v3Idx < v1Idx) continue;
+
+                bool isNeighbour = false;
+                for (int col3 = 0; col3 < neighbours.cols(); col3++) {
+                    int v2Neighbour = neighbours(v2Idx, col3);
+                    if (v2Neighbour < 0) break;
+                    if (v2Neighbour == v3Idx) {
+                        isNeighbour = true;
+                        break;
+                    }
+                }
+
+                if (isNeighbour) {
+                    tris.push_back({v1Idx, v2Idx, v3Idx});
+                }
+            }
+        }
+    }
+    tris.shrink_to_fit();
+
+    return tris;
+}
 
 void constructHierarchy() {
     auto filePath = meshFiles[selectedMeshFile];
@@ -181,7 +219,7 @@ void constructHierarchy() {
     hierarchyProlongationFallback = solver.prolongationFallback;
 
     hierarchyVertices.insert(hierarchyVertices.begin(), positions);
-    hierarchyTriangles.insert(hierarchyTriangles.begin(), std::vector<std::vector<int>>());
+    hierarchyTriangles.insert(hierarchyTriangles.begin(), generateTriangles(positions, neighbours));
     hierarchyNeighbours.insert(hierarchyNeighbours.begin(), neighbours);
 }
 
@@ -208,7 +246,8 @@ static std::vector<std::vector<int>> getEdges(Eigen::MatrixXi &neighbours) {
 
 static void bufferHierarchyData(Eigen::MatrixXd &fineVertexPositions, Eigen::MatrixXd &coarseVertexPositions,
                          std::vector<int> &sampling, Eigen::VectorXi &neighbourhoods, std::vector<Eigen::Vector3f> &neighbourhoodColors,
-                         Eigen::MatrixXi &fineNeighbours, Eigen::MatrixXi &coarseNeighbours) {
+                         Eigen::MatrixXi &fineNeighbours, Eigen::MatrixXi &coarseNeighbours,
+                         std::vector<std::vector<int>> &fineTriangles, std::vector<std::vector<int>> &coarseTriangles) {
     glBindVertexArray(vertexArray);
 
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
@@ -233,12 +272,13 @@ static void bufferHierarchyData(Eigen::MatrixXd &fineVertexPositions, Eigen::Mat
     glBufferData(GL_ARRAY_BUFFER, fineVertexPositions.rows() * sizeof(GLboolean), samplingData, GL_STATIC_DRAW);
 
     glBindBuffer(GL_ARRAY_BUFFER, colorBuffer);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
-    std::vector<Eigen::Vector3f> colorData(fineVertexPositions.rows());
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    std::vector<Eigen::Vector4f> colorData(fineVertexPositions.rows());
     for (int v = 0; v < fineVertexPositions.rows(); v++) {
-        colorData[v] = neighbourhoodColors[neighbourhoods[v]];
+        auto col = neighbourhoodColors[neighbourhoods[v]];
+        colorData[v] = Eigen::Vector4f(col.x(), col.y(), col.z(), 1);
     }
-    glBufferData(GL_ARRAY_BUFFER, fineVertexPositions.rows() * sizeof(Eigen::Vector3f), &colorData[0], GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, fineVertexPositions.rows() * sizeof(Eigen::Vector4f), &colorData[0], GL_STATIC_DRAW);
 
     glBindBuffer(GL_ARRAY_BUFFER, edgeBuffer);
     auto edges = getEdges(fineNeighbours);
@@ -254,6 +294,22 @@ static void bufferHierarchyData(Eigen::MatrixXd &fineVertexPositions, Eigen::Mat
         flattenedEdges.push_back(e[1]);
     }
     glBufferData(GL_ARRAY_BUFFER, edges.size() * 2 * sizeof(GLuint), &flattenedEdges[0], GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, triangleBuffer);
+    auto triangles = fineTriangles;
+    triangles.insert(triangles.end(), coarseTriangles.begin(), coarseTriangles.end());
+    for (int i = fineTriangles.size(); i < triangles.size(); i++) {
+        triangles[i][0] += fineVertexPositions.rows();
+        triangles[i][1] += fineVertexPositions.rows();
+        triangles[i][2] += fineVertexPositions.rows();
+    }
+    std::vector<int> flattenedTriangles;
+    for (auto t : triangles) {
+        flattenedTriangles.push_back(t[0]);
+        flattenedTriangles.push_back(t[1]);
+        flattenedTriangles.push_back(t[2]);
+    }
+    glBufferData(GL_ARRAY_BUFFER, triangles.size() * 3 * sizeof(GLuint), &flattenedTriangles[0], GL_STATIC_DRAW);
 }
 
 static void bufferProlongationData(Prolongation prolongation, Eigen::MatrixXd &fineVertexPositions, Eigen::MatrixXd &coarseVertexPositions,
@@ -449,7 +505,7 @@ void updateBuffers(bool updateHierarchyBuffers, bool updateProlongationBuffers) 
     }
 
     if (updateHierarchyBuffers)
-        bufferHierarchyData(hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], hierarchySampling[displayLevel], neighbourhoods, neighbourhoodColors, hierarchyNeighbours[displayLevel], hierarchyNeighbours[displayLevel + 1]);
+        bufferHierarchyData(hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], hierarchySampling[displayLevel], neighbourhoods, neighbourhoodColors, hierarchyNeighbours[displayLevel], hierarchyNeighbours[displayLevel + 1], hierarchyTriangles[displayLevel], hierarchyTriangles[displayLevel + 1]);
 
     if (updateProlongationBuffers)
         bufferProlongationData(prolongation, hierarchyVertices[displayLevel], hierarchyVertices[displayLevel + 1], projectedVertexPosition, selectedPoint, candidateEdges, prolongationVertices);
@@ -477,6 +533,120 @@ void loadMeshFromFile(const std::string& filePath) {
     } else {
         std::cout << "Cannot read file: " << filePath << std::endl;
     }
+}
+
+void drawSamplingEdgesAndVertices(Shader &defaultShader, Shader &samplingShader, int nFineEdges) {
+    // draw edges
+    defaultShader.use();
+    defaultShader.setBool("useUniformColor", false);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
+    glDrawElements(GL_LINES, 2 * nFineEdges, GL_UNSIGNED_INT, 0);
+
+    // draw vertices
+    samplingShader.use();
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
+    glDisableVertexAttribArray(1);
+}
+
+void drawNeighbourhoodsEdgesAndVertices(Shader &defaultShader, int nFineEdges) {
+    // draw edges
+    defaultShader.use();
+    defaultShader.setBool("useUniformColor", false);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
+    glDrawElements(GL_LINES, 2 * nFineEdges, GL_UNSIGNED_INT, 0);
+
+    // draw vertices
+    glEnableVertexAttribArray(2);
+    glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
+    glDisableVertexAttribArray(2);
+}
+
+void drawProlongationEdgesAndVertices(Shader &defaultShader, int nFineEdges, int nCoarseEdges) {
+    // draw edges
+    defaultShader.use();
+    defaultShader.setBool("useUniformColor", false);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
+    glDrawElements(GL_LINES, 2 * nCoarseEdges, GL_UNSIGNED_INT, (void*) (nFineEdges * 2 * sizeof(GLuint)));
+
+    // draw candidate edges
+    defaultShader.setBool("useUniformColor", true);
+    defaultShader.setVec4("uColor", glm::vec4(1, 1, 0, 1));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prolongationEdgeBuffer);
+    glDrawElements(GL_LINES, 2 * candidateEdges.size(), GL_UNSIGNED_INT, 0);
+
+    switch (prolongation) {
+        case barycentricTriangle:
+            // draw final triangle
+            defaultShader.setVec4("uColor", glm::vec4(0, 0.8f, 1, 1));
+            glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
+
+            // draw barycentric lines
+            defaultShader.setVec4("uColor", glm::vec4(1, 0, 0, 1));
+            glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) ((candidateEdges.size() + 3) * 2 * sizeof(GLuint)));
+            break;
+        case barycentricEdge:
+            // draw barycentric edge
+            defaultShader.setVec4("uColor", glm::vec4(1, 0, 0, 1));
+            glDrawElements(GL_LINES, 2, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
+            break;
+        case fallback:
+            // draw lines to closest points
+            defaultShader.setVec4("uColor", glm::vec4(1, 0, 0, 1));
+            glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
+            break;
+    }
+
+    if (prolongation != fallback) {
+        // draw coarse point
+        defaultShader.setVec4("uColor", glm::vec4(1, 1, 0, 1));
+        glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + coarsePoint, 1);
+
+        // draw projected point
+        defaultShader.setVec4("uColor", glm::vec4(0.6f, 0, 0.8f, 1));
+        glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + hierarchyVertices[displayLevel + 1].rows(), 1);
+    }
+
+    // draw selected point
+    defaultShader.setVec4("uColor", glm::vec4(1, 0, 1, 1));
+    glDrawArrays(GL_POINTS, selectedPoint, 1);
+}
+
+void drawTriangles(Shader &defaultShader, bool fine) {
+    defaultShader.use();
+    defaultShader.setBool("useUniformColor", true);
+    defaultShader.setVec4("uColor", glm::vec4(0.6));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, triangleBuffer);
+
+    if (fine) {
+        glDrawElements(GL_TRIANGLES, 3 * hierarchyTriangles[displayLevel].size(), GL_UNSIGNED_INT, 0);
+    } else {
+        glDrawElements(GL_TRIANGLES, 3 * hierarchyTriangles[displayLevel + 1].size(), GL_UNSIGNED_INT, (void*) (hierarchyTriangles[displayLevel].size() * 3 * sizeof(GLuint)));
+    }
+}
+
+void drawModel(const std::function<void()>& drawEdgesAndVertices, const std::function<void()>& drawTriangles) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    drawEdgesAndVertices();
+    drawTriangles();
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+    // fill depth buffer
+    drawTriangles();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthFunc(GL_LEQUAL);
+
+    drawEdgesAndVertices();
+
+    glDisable(GL_DEPTH_TEST);
 }
 
 int main()
@@ -573,6 +743,7 @@ int main()
     glGenBuffers(1, &colorBuffer);
     glGenBuffers(1, &edgeBuffer);
     glGenBuffers(1, &prolongationEdgeBuffer);
+    glGenBuffers(1, &triangleBuffer);
 
     // render loop
     // -----------
@@ -754,10 +925,13 @@ int main()
         // set point size
         glPointSize(5 * 45 / camera.Zoom);
 
+        // enable smooth lines
+        glEnable(GL_LINE_SMOOTH);
+
         // render
         // ------
-        glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClearColor(0.3f, 0.3f, 0.3f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         int nFineEdges = countEdges(hierarchyNeighbours[displayLevel]);
         int nCoarseEdges = countEdges(hierarchyNeighbours[displayLevel + 1]);
@@ -768,80 +942,20 @@ int main()
         // sampling (left pane)
         glViewport(0, 0, vpWidth, vpHeight);
 
-        // draw edges
-        defaultShader.use();
-        defaultShader.setBool("useUniformColor", false);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
-        glDrawElements(GL_LINES, 2 * nFineEdges, GL_UNSIGNED_INT, 0);
-
-        // draw vertices
-        samplingShader.use();
-        glEnableVertexAttribArray(0);
-        glEnableVertexAttribArray(1);
-        glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
-        glDisableVertexAttribArray(1);
+        drawModel([&]() { drawSamplingEdgesAndVertices(defaultShader, samplingShader, nFineEdges); },
+                  [&]() { drawTriangles(defaultShader, true); });
 
         // neighbourhoods (middle pane)
         glViewport(vpWidth, 0, vpWidth, vpHeight);
 
-        // draw edges
-        defaultShader.use();
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
-        glDrawElements(GL_LINES, 2 * nFineEdges, GL_UNSIGNED_INT, 0);
-
-        // draw vertices
-        glEnableVertexAttribArray(2);
-        glDrawArrays(GL_POINTS, 0, hierarchyVertices[displayLevel].rows());
-        glDisableVertexAttribArray(2);
+        drawModel([&]() { drawNeighbourhoodsEdgesAndVertices(defaultShader, nFineEdges); },
+                  [&]() { drawTriangles(defaultShader, true); });
 
         // prolongation (right pane)
         glViewport(2 * vpWidth, 0, vpWidth, vpHeight);
 
-        // draw edges
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, edgeBuffer);
-        glDrawElements(GL_LINES, 2 * nCoarseEdges, GL_UNSIGNED_INT, (void*) (nFineEdges * 2 * sizeof(GLuint)));
-
-        // draw candidate edges
-        defaultShader.setBool("useUniformColor", true);
-        defaultShader.setVec3("uColor", glm::vec3(1, 1, 0));
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, prolongationEdgeBuffer);
-        glDrawElements(GL_LINES, 2 * candidateEdges.size(), GL_UNSIGNED_INT, 0);
-
-        switch (prolongation) {
-            case barycentricTriangle:
-                // draw final triangle
-                defaultShader.setVec3("uColor", glm::vec3(0, 0.8f, 1));
-                glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
-
-                // draw barycentric lines
-                defaultShader.setVec3("uColor", glm::vec3(1, 0, 0));
-                glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) ((candidateEdges.size() + 3) * 2 * sizeof(GLuint)));
-                break;
-            case barycentricEdge:
-                // draw barycentric edge
-                defaultShader.setVec3("uColor", glm::vec3(1, 0, 0));
-                glDrawElements(GL_LINES, 2, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
-                break;
-            case fallback:
-                // draw lines to closest points
-                defaultShader.setVec3("uColor", glm::vec3(1, 0, 0));
-                glDrawElements(GL_LINES, 6, GL_UNSIGNED_INT, (void*) (candidateEdges.size() * 2 * sizeof(GLuint)));
-                break;
-        }
-
-        if (prolongation != fallback) {
-            // draw coarse point
-            defaultShader.setVec3("uColor", glm::vec3(1, 1, 0));
-            glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + coarsePoint, 1);
-
-            // draw projected point
-            defaultShader.setVec3("uColor", glm::vec3(0.6f, 0, 0.8f));
-            glDrawArrays(GL_POINTS, hierarchyVertices[displayLevel].rows() + hierarchyVertices[displayLevel + 1].rows(), 1);
-        }
-
-        // draw selected point
-        defaultShader.setVec3("uColor", glm::vec3(1, 0, 1));
-        glDrawArrays(GL_POINTS, selectedPoint, 1);
+        drawModel([&]() { drawProlongationEdgesAndVertices(defaultShader, nFineEdges, nCoarseEdges); },
+                  [&]() { drawTriangles(defaultShader, false); });
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -860,6 +974,7 @@ int main()
     glDeleteBuffers(1, &colorBuffer);
     glDeleteBuffers(1, &edgeBuffer);
     glDeleteBuffers(1, &prolongationEdgeBuffer);
+    glDeleteBuffers(1, &triangleBuffer);
 
     NFD_Quit();
 
