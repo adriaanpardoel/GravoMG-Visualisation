@@ -6,6 +6,7 @@
 #include <CGAL/Polyhedron_3.h>
 #include <CGAL/Point_set_3.h>
 #include <CGAL/compute_average_spacing.h>
+#include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_glfw.h"
@@ -14,7 +15,6 @@
 #include <nfd.h>
 
 #include "learnopengl/shader.h"
-#include "learnopengl/camera.h"
 
 #include "gravomg/multigrid_solver.h"
 
@@ -41,17 +41,15 @@ int frameBufferWidth;
 int frameBufferHeight;
 
 // camera
-Camera camera(glm::vec3(0.0f, 0.0f, 2.0f));
+glm::vec3 cameraPosition;
+glm::vec3 cameraFront;
+glm::vec3 cameraUp;
+glm::vec2 cameraRotation;
 
 // mouse press callback
 bool mousePressed;
-bool firstCursorPositionCallbackOnPress;
-glm::vec2 mousePressedPosition;
-glm::vec2 currentMousePosition;
-
-// rotation
-glm::vec2 rotationAngles;
-glm::vec2 rotationAnglesDrag;
+bool mouseDragged;
+glm::vec2 lastMousePosition;
 
 // user settings
 static float phi = 0.125f;
@@ -97,6 +95,12 @@ std::vector<std::string> meshLabels;
 int selectedMeshFile;
 
 PointSet pointSet;
+
+
+float maxDim;
+float initialZoom;
+
+glm::vec3 modelCenter;
 
 
 // vertex buffer: [n fine vertices, m coarse vertices, 1 projected vertex] x 3d
@@ -184,6 +188,8 @@ void constructHierarchy() {
         }
     } else {
         // surface mesh
+        CGAL::Polygon_mesh_processing::triangulate_faces(surface);
+
         for (auto v : surface.vertices()) {
             auto p = surface.point(v);
 
@@ -221,6 +227,18 @@ void constructHierarchy() {
     hierarchyVertices.insert(hierarchyVertices.begin(), positions);
     hierarchyTriangles.insert(hierarchyTriangles.begin(), generateTriangles(positions, neighbours));
     hierarchyNeighbours.insert(hierarchyNeighbours.begin(), neighbours);
+
+    Eigen::RowVectorXd minVal = positions.colwise().minCoeff();
+    Eigen::RowVectorXd maxVal = positions.colwise().maxCoeff();
+
+    modelCenter = { (minVal.x() + maxVal.x()) / 2.0f, (minVal.y() + maxVal.y()) / 2.0f, (minVal.z() + maxVal.z()) / 2.0f };
+    maxDim = max(max(maxVal.x() - minVal.x(), maxVal.y() - minVal.y()), maxVal.z() - minVal.z());
+
+    cameraPosition = { 0, 0, maxVal.z() - modelCenter.z + 2 * maxDim };
+    cameraFront = { 0, 0, -1 };
+    cameraUp = { 0, 1, 0 };
+    cameraRotation = { 0, 0 };
+    initialZoom = cameraPosition.z;
 }
 
 static int countEdges(Eigen::MatrixXi &neighbours) {
@@ -516,6 +534,7 @@ void loadMeshFromFile(const std::string& filePath) {
 
     surface.clear();
     pointSet.clear();
+
     std::ifstream in(filePath);
 
     if (ext == "off") {
@@ -731,12 +750,6 @@ int main()
 
     loadMeshFromFile(meshFiles[selectedMeshFile]);
 
-    auto nVertices = surface.num_vertices();
-    auto nEdges = surface.num_edges();
-
-    std::cout << "#vertices = " << nVertices << std::endl;
-    std::cout << "#edges = " << nEdges << std::endl;
-
     glGenVertexArrays(1, &vertexArray);
     glGenBuffers(1, &vertexBuffer);
     glGenBuffers(1, &samplingBuffer);
@@ -904,26 +917,27 @@ int main()
         int vpHeight = 0.9 * frameBufferHeight;
 
         // pass projection matrix to shader (note that in this case it could change every frame)
-        projection = glm::perspective(glm::radians(camera.Zoom), (float)vpWidth / (float)vpHeight, 0.1f, 100.0f);
+        projection = glm::perspective(glm::radians(45.0f), (float)vpWidth / (float)vpHeight, 0.1f, maxDim * 100.0f);
         defaultShader.setMat4("projection", projection);
         samplingShader.setMat4("projection", projection);
 
         // camera/view transformation
-        view = camera.GetViewMatrix();
+        view = glm::lookAt(cameraPosition, cameraPosition + cameraFront, cameraUp);
+        view = glm::rotate(view, cameraRotation.x, glm::vec3(1, 0, 0));
+        view = glm::rotate(view, cameraRotation.y, glm::vec3(0, 1, 0));
         defaultShader.setMat4("view", view);
         samplingShader.setMat4("view", view);
 
         // calculate the model matrix and pass it to shader before drawing
         model = glm::mat4(1.0f); // make sure to initialize matrix to identity matrix first
-        model = glm::rotate(model, rotationAngles.x + rotationAnglesDrag.x, glm::vec3(1, 0, 0));
-        model = glm::rotate(model, rotationAngles.y + rotationAnglesDrag.y, glm::vec3(0, 1, 0));
+        model = glm::translate(model, -modelCenter);
         defaultShader.setMat4("model", model);
         samplingShader.setMat4("model", model);
 
         samplingShader.setInt("selectedVertex", selectedPoint);
 
         // set point size
-        glPointSize(5 * 45 / camera.Zoom);
+        glPointSize(5 * initialZoom / glm::length(cameraPosition));
 
         // enable smooth lines
         glEnable(GL_LINE_SMOOTH);
@@ -1013,18 +1027,17 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
         if (action == GLFW_PRESS) {
             mousePressed = true;
-            firstCursorPositionCallbackOnPress = true;
+            mouseDragged = false;
         } else {
             mousePressed = false;
-            firstCursorPositionCallbackOnPress = false;
 
-            if (rotationAnglesDrag == glm::vec2(0)) {
+            if (!mouseDragged) {
                 int vpWidth = 0.333 * screenWidth;
                 int vpHeight = 0.9 * screenHeight;
 
-                if (currentMousePosition.x < vpWidth && currentMousePosition.y > 0.1 * screenHeight) {
-                    float x = (2.0f * ((int)currentMousePosition.x % vpWidth)) / vpWidth - 1.0f;
-                    float y = 1.0f - (2.0f * (currentMousePosition.y - 0.1f * screenHeight)) / vpHeight;
+                if (lastMousePosition.x < vpWidth && lastMousePosition.y > 0.1 * screenHeight) {
+                    float x = (2.0f * ((int)lastMousePosition.x % vpWidth)) / vpWidth - 1.0f;
+                    float y = 1.0f - (2.0f * (lastMousePosition.y - 0.1f * screenHeight)) / vpHeight;
                     float z = 1.0f;
                     glm::vec3 ray_nds(x, y, z);
 
@@ -1034,18 +1047,21 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 
                     ray_eye = glm::vec4(ray_eye.x, ray_eye.y, -1.0, 0.0);
 
-                    glm::vec4 inv_ray_wor = inverse(model) * inverse(view) * ray_eye;
-                    glm::vec3 ray_wor = glm::vec3(inv_ray_wor.x, inv_ray_wor.y, inv_ray_wor.z);
+                    glm::vec3 ray_wor = inverse(model) * inverse(view) * ray_eye;
                     ray_wor = normalize(ray_wor);
 
-                    rayCamPos = inverse(model) * glm::vec4(camera.Position.x, camera.Position.y, camera.Position.z, 1.0f);
+                    auto rot = glm::mat4(1.0f);
+                    rot = glm::rotate(rot, cameraRotation.x, glm::vec3(1, 0, 0));
+                    rot = glm::rotate(rot, cameraRotation.y, glm::vec3(0, 1, 0));
+
+                    rayCamPos = inverse(model) * inverse(rot) * glm::vec4(cameraPosition, 1.0f);
 
                     float tMin = INFINITY;
                     int vMin;
                     bool intersection = false;
                     int intersections = 0;
 
-                    float radius2 = 0.0001f;
+                    float radius2 = pow(maxDim, 1.5) * 0.0001f; // heuristic that works well
 
                     for (int v = 0; v < hierarchyVertices[displayLevel].rows(); v++) {
                         float t0, t1; // solutions for t if the ray intersects
@@ -1057,7 +1073,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                         float tca = glm::dot(L, ray_wor);
                         // if (tca < 0) return false;
                         float d2 = glm::dot(L, L) - tca * tca;
-                        if (d2 > radius2) continue;
+                        if (d2 > min(1.0f, tca / maxDim) * radius2) continue; // heuristic that works well
                         float thc = sqrt(radius2 - d2);
                         t0 = tca - thc;
                         t1 = tca + thc;
@@ -1085,8 +1101,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 }
             }
 
-            rotationAngles += rotationAnglesDrag;
-            rotationAnglesDrag = glm::vec2(0);
+            mouseDragged = false;
         }
     }
 }
@@ -1101,17 +1116,22 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
     }
 
     if (mousePressed) {
-        if (firstCursorPositionCallbackOnPress) {
-            mousePressedPosition = glm::vec2(xpos, ypos);
-            firstCursorPositionCallbackOnPress = false;
-        }
+        mouseDragged = true;
 
-        float xRotationAngleDrag = (ypos - mousePressedPosition.y) * 2 * M_PI / screenHeight;
-        float yRotationAngleDrag = (xpos - mousePressedPosition.x) * 2 * M_PI / screenWidth;
-        rotationAnglesDrag = glm::vec2(xRotationAngleDrag, yRotationAngleDrag);
+        float xRot = (ypos - lastMousePosition.y) * 2 * M_PI / screenHeight;
+        float yRot = (xpos - lastMousePosition.x) * 2 * M_PI / screenWidth;
+        cameraRotation += glm::vec2(xRot, yRot);
+
+        int times2Pi = cameraRotation.x / (2 * M_PI);
+        cameraRotation.x -= times2Pi * 2 * M_PI;
+        if (cameraRotation.x < 0) cameraRotation.x += 2 * M_PI;
+
+        if (0.5f * M_PI < cameraRotation.x && cameraRotation.x < 1.5f * M_PI) {
+            cameraRotation.y -= 2 * yRot;
+        }
     }
 
-    currentMousePosition = glm::vec2(xpos, ypos);
+    lastMousePosition = glm::vec2(xpos, ypos);
 }
 
 // glfw: whenever the mouse scroll wheel scrolls, this callback is called
@@ -1123,7 +1143,30 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
         return;
     }
 
-    camera.ProcessMouseScroll(static_cast<float>(yoffset));
+    int vpWidth = 0.333 * screenWidth;
+    int vpHeight = 0.9 * screenHeight;
+
+    float x = (2.0f * ((int)lastMousePosition.x % vpWidth)) / vpWidth - 1.0f;
+    float y = 1.0f - (2.0f * (lastMousePosition.y - 0.1f * screenHeight)) / vpHeight;
+    float z = 1.0f;
+    glm::vec3 ray_nds(x, y, z);
+
+    glm::vec4 ray_clip(ray_nds.x, ray_nds.y, -1.0, 1.0);
+
+    glm::vec4 ray_eye = inverse(projection) * ray_clip;
+
+    ray_eye = glm::vec4(ray_eye.x, ray_eye.y, -1.0, 0.0);
+
+    glm::vec4 inv_ray_wor = inverse(model) * inverse(view) * ray_eye;
+
+    auto rot = glm::mat4(1.0f);
+    rot = glm::rotate(rot, cameraRotation.x, glm::vec3(1, 0, 0));
+    rot = glm::rotate(rot, cameraRotation.y, glm::vec3(0, 1, 0));
+
+    glm::vec3 ray_wor = rot * inv_ray_wor;
+    ray_wor = normalize(ray_wor);
+
+    cameraPosition += 0.05f * maxDim * (float)yoffset * ray_wor;
 }
 
 // glfw: whenever the window is resized, this callback is fired
