@@ -96,6 +96,7 @@ std::vector<std::string> levelLabels;
 std::vector<std::string> meshFiles;
 std::vector<std::string> meshLabels;
 int selectedMeshFile;
+bool meshErrorPopup;
 
 PointSet pointSet;
 
@@ -191,22 +192,26 @@ void constructHierarchy() {
         }
     } else {
         // surface mesh
-        CGAL::Polygon_mesh_processing::triangulate_faces(surface);
+        try {
+            CGAL::Polygon_mesh_processing::triangulate_faces(surface);
 
-        for (auto v : surface.vertices()) {
-            auto p = surface.point(v);
+            for (auto v : surface.vertices()) {
+                auto p = surface.point(v);
 
-            positions(v.idx(), 0) = p.x();
-            positions(v.idx(), 1) = p.y();
-            positions(v.idx(), 2) = p.z();
+                positions(v.idx(), 0) = p.x();
+                positions(v.idx(), 1) = p.y();
+                positions(v.idx(), 2) = p.z();
 
-            int col = 0;
-            for (auto outEdge : CGAL::halfedges_around_source(v, surface)) {
-                auto neighbour = surface.target(outEdge);
-                neighbours(v.idx(), col++) = neighbour.idx();
+                int col = 0;
+                for (auto outEdge : CGAL::halfedges_around_source(v, surface)) {
+                    auto neighbour = surface.target(outEdge);
+                    neighbours(v.idx(), col++) = neighbour.idx();
+                }
+
+                maxNeighbours = std::max(maxNeighbours, col);
             }
-
-            maxNeighbours = std::max(maxNeighbours, col);
+        } catch (...) {
+            meshErrorPopup = true;
         }
     }
 
@@ -230,6 +235,10 @@ void constructHierarchy() {
     hierarchyVertices.insert(hierarchyVertices.begin(), positions);
     hierarchyTriangles.insert(hierarchyTriangles.begin(), generateTriangles(positions, neighbours));
     hierarchyNeighbours.insert(hierarchyNeighbours.begin(), neighbours);
+
+    if (hierarchyProlongation.empty()) {
+        meshErrorPopup = true;
+    }
 
     Eigen::RowVectorXd minVal = positions.colwise().minCoeff();
     Eigen::RowVectorXd maxVal = positions.colwise().maxCoeff();
@@ -451,8 +460,15 @@ void addMeshFile(const std::string& filePath) {
 
     std::string fileName = filePath.substr(filePath.find_last_of("/\\") + 1);
 
+    std::string fileLabel = fileName;
+    int labelIndex = 1;
+    while (std::distance(meshLabels.begin(), std::find(meshLabels.begin(), meshLabels.end(), fileLabel)) < meshLabels.size()) {
+        fileLabel = fileName + " (" + std::to_string(labelIndex++) + ")";
+    }
+
     meshFiles.push_back(filePath);
-    meshLabels.push_back(fileName);
+    meshLabels.push_back(fileLabel);
+    selectedMeshFile = meshFiles.size() - 1;
 }
 
 void updateBuffers(bool updateHierarchyBuffers, bool updateProlongationBuffers) {
@@ -541,19 +557,17 @@ void loadMeshFromFile(const std::string& filePath) {
     std::ifstream in(filePath);
 
     if (ext == "off") {
-        CGAL::IO::read_OFF(in, surface);
+        meshErrorPopup = !CGAL::IO::read_OFF(in, surface);
     } else if (ext == "obj") {
-        CGAL::IO::read_OBJ(in, surface);
+        meshErrorPopup = !CGAL::IO::read_OBJ(in, surface);
     } else if (ext == "stl") {
-        CGAL::IO::read_STL(in, surface);
+        meshErrorPopup = !CGAL::IO::read_STL(in, surface);
     } else if (ext == "ply") {
-        CGAL::IO::read_PLY(in, surface);
+        meshErrorPopup = !CGAL::IO::read_PLY(in, surface);
     } else if (ext == "ts") {
-        CGAL::IO::read_GOCAD(in, surface);
+        meshErrorPopup = !CGAL::IO::read_GOCAD(in, surface);
     } else if (ext == "xyz") {
-        CGAL::IO::read_XYZ(in, pointSet);
-    } else {
-        std::cout << "Cannot read file: " << filePath << std::endl;
+        meshErrorPopup = !CGAL::IO::read_XYZ(in, pointSet);
     }
 }
 
@@ -831,8 +845,6 @@ int main()
 
                 if (result == NFD_OKAY) {
                     addMeshFile(std::string(outPath));
-
-                    selectedMeshFile = meshFiles.size() - 1;
                     loadMeshFromFile(meshFiles[selectedMeshFile]);
                     constructHierarchy();
                     displayLevel = 0;
@@ -893,8 +905,29 @@ int main()
             ImGui::OpenPopup("Not found");
         }
 
+        if (meshErrorPopup) {
+            ImGui::OpenPopup("File error");
+            meshErrorPopup = false;
+        }
+
         // Always center this window when appearing
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+        if (ImGui::BeginPopupModal("File error", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Unfortunately, the file could not be opened :(");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (ImGui::Button("OK", ImVec2(-1.0f, 0.0f))) { ImGui::CloseCurrentPopup(); }
+            ImGui::SetItemDefaultFocus();
+            ImGui::EndPopup();
+        }
+
         ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
         if (ImGui::BeginPopupModal("Not found", NULL, ImGuiWindowFlags_AlwaysAutoResize))
@@ -950,29 +983,31 @@ int main()
         glClearColor(0.3f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        int nFineEdges = countEdges(hierarchyNeighbours[displayLevel]);
-        int nCoarseEdges = countEdges(hierarchyNeighbours[displayLevel + 1]);
+        if (!hierarchyProlongation.empty()) {
+            int nFineEdges = countEdges(hierarchyNeighbours[displayLevel]);
+            int nCoarseEdges = countEdges(hierarchyNeighbours[displayLevel + 1]);
 
-        glBindVertexArray(vertexArray);
-        glEnableVertexAttribArray(0);
+            glBindVertexArray(vertexArray);
+            glEnableVertexAttribArray(0);
 
-        // sampling (left pane)
-        glViewport(0, 0, vpWidth, vpHeight);
+            // sampling (left pane)
+            glViewport(0, 0, vpWidth, vpHeight);
 
-        drawModel([&]() { drawSamplingEdgesAndVertices(defaultShader, samplingShader, nFineEdges); },
-                  [&]() { drawTriangles(defaultShader, true); });
+            drawModel([&]() { drawSamplingEdgesAndVertices(defaultShader, samplingShader, nFineEdges); },
+                      [&]() { drawTriangles(defaultShader, true); });
 
-        // neighbourhoods (middle pane)
-        glViewport(vpWidth, 0, vpWidth, vpHeight);
+            // neighbourhoods (middle pane)
+            glViewport(vpWidth, 0, vpWidth, vpHeight);
 
-        drawModel([&]() { drawNeighbourhoodsEdgesAndVertices(defaultShader, nFineEdges); },
-                  [&]() { drawTriangles(defaultShader, true); });
+            drawModel([&]() { drawNeighbourhoodsEdgesAndVertices(defaultShader, nFineEdges); },
+                      [&]() { drawTriangles(defaultShader, true); });
 
-        // prolongation (right pane)
-        glViewport(2 * vpWidth, 0, vpWidth, vpHeight);
+            // prolongation (right pane)
+            glViewport(2 * vpWidth, 0, vpWidth, vpHeight);
 
-        drawModel([&]() { drawProlongationEdgesAndVertices(defaultShader, nFineEdges, nCoarseEdges); },
-                  [&]() { drawTriangles(defaultShader, false); });
+            drawModel([&]() { drawProlongationEdgesAndVertices(defaultShader, nFineEdges, nCoarseEdges); },
+                      [&]() { drawTriangles(defaultShader, false); });
+        }
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -1027,7 +1062,7 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 // ------------------------------------------------------------------
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 {
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT && !hierarchyProlongation.empty()) {
         if (action == GLFW_PRESS) {
             mousePressed = true;
             mouseDragged = false;
