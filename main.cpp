@@ -840,7 +840,7 @@ int main()
 
             if (ImGui::Selectable("Select file...")) {
                 nfdchar_t *outPath;
-                nfdfilteritem_t filterItem[1] = { { "Object files", "obj,off" } };
+                nfdfilteritem_t filterItem[1] = { { "Object files", "off,obj,stl,ply,ts,xyz" } };
                 nfdresult_t result = NFD_OpenDialog(&outPath, filterItem, 1, NULL);
 
                 if (result == NFD_OKAY) {
