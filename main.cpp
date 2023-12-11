@@ -784,11 +784,11 @@ int main()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("Options", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
+        ImGui::Begin("Options", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
         ImGui::SetWindowPos(ImVec2(10, 10));
-        ImGui::SetWindowSize(ImVec2(300, 120));
+        ImGui::SetWindowSize(ImVec2(250, 0));
 
-        ImGui::DragFloat("phi", &phi, 0.005f);
+        ImGui::DragFloat("Phi", &phi, 0.005f, 0.0f, 1.0f);
         if (!ImGui::IsItemActive() && phi != prevPhi) {
             prevPhi = phi;
 
@@ -854,28 +854,49 @@ int main()
             ImGui::EndCombo();
         }
 
-        ImGui::End();
+        ImGui::Begin("Prolongation", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
+        ImGui::SetWindowPos(ImVec2(screenWidth - 430, 10));
+        ImGui::SetWindowSize(ImVec2(420, 0));
+        ImGui::BeginGroup();
 
-        ImGui::Begin("Prolongation", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
-        ImGui::SetWindowPos(ImVec2(screenWidth - 300 - 10, 10));
-        ImGui::SetWindowSize(ImVec2(300, 120));
+        ImGui::Text("Show prolongation:");
+        ImGui::Spacing();
+
+        bool prolongationFound = true;
+
+        if (ImGui::Button("Triangle", ImVec2(200, 22))) {
+            prolongationFound = showProlongation(barycentricTriangle);
+        }
+        if (ImGui::Button("Edge", ImVec2(200, 22))) {
+            prolongationFound = showProlongation(barycentricEdge);
+        }
+        if (ImGui::Button("Fallback", ImVec2(200, 22))) {
+            prolongationFound = showProlongation(fallback);
+        }
+
+        ImGui::EndGroup();
+        ImGui::SameLine(0, 10);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(127, 127, 127, 100));
+        ImGui::BeginChild("Divider", ImVec2(1, 0), 0, ImGuiWindowFlags_None);
+        ImGui::PopStyleColor();
+        ImGui::EndChild();
+        ImGui::SameLine(0, 10);
+        ImGui::BeginGroup();
 
         const char* prolongationDesc;
         switch (prolongation) {
             case barycentricTriangle:
-                prolongationDesc = "Barycentric coordinates in triangle";
-                break;
             case barycentricEdge:
-                prolongationDesc = "Barycentric coordinates on edge";
+                prolongationDesc = "Barycentric coordinates";
                 break;
             case fallback:
                 prolongationDesc = "Inverse distance weights";
                 break;
         }
 
-        ImGui::Text("Prolongation:");
+        ImGui::Text("Strategy:");
         ImGui::Text("%s", prolongationDesc);
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0, 6));
         ImGui::Text("v1: %f", prolongationWeights[0]);
         ImGui::Text("v2: %f", prolongationWeights[1]);
 
@@ -883,23 +904,8 @@ int main()
             ImGui::Text("v3: %f", prolongationWeights[2]);
         }
 
+        ImGui::EndGroup();
         ImGui::End();
-
-        ImGui::Begin("Show prolongation", NULL, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration);
-        ImGui::SetWindowPos(ImVec2(screenWidth - 620, 10));
-        ImGui::SetWindowSize(ImVec2(300, 120));
-
-        bool prolongationFound = true;
-
-        if (ImGui::Button("Show barycentric triangle")) {
-            prolongationFound = showProlongation(barycentricTriangle);
-        }
-        if (ImGui::Button("Show barycentric edge")) {
-            prolongationFound = showProlongation(barycentricEdge);
-        }
-        if (ImGui::Button("Show fallback")) {
-            prolongationFound = showProlongation(fallback);
-        }
 
         if (!prolongationFound) {
             ImGui::OpenPopup("Not found");
@@ -950,7 +956,7 @@ int main()
         processInput(window);
 
         int vpWidth = 0.333 * frameBufferWidth;
-        int vpHeight = 0.9 * frameBufferHeight;
+        int vpHeight = frameBufferHeight;
 
         // pass projection matrix to shader (note that in this case it could change every frame)
         projection = glm::perspective(glm::radians(45.0f), (float)vpWidth / (float)vpHeight, 0.1f, maxDim * 100.0f);
@@ -1071,11 +1077,11 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 
             if (!mouseDragged) {
                 int vpWidth = 0.333 * screenWidth;
-                int vpHeight = 0.9 * screenHeight;
+                int vpHeight = screenHeight;
 
                 if (lastMousePosition.x < vpWidth && lastMousePosition.y > 0.1 * screenHeight) {
                     float x = (2.0f * ((int)lastMousePosition.x % vpWidth)) / vpWidth - 1.0f;
-                    float y = 1.0f - (2.0f * (lastMousePosition.y - 0.1f * screenHeight)) / vpHeight;
+                    float y = 1.0f - 2.0f * lastMousePosition.y / vpHeight;
                     float z = 1.0f;
                     glm::vec3 ray_nds(x, y, z);
 
@@ -1182,10 +1188,10 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
     }
 
     int vpWidth = 0.333 * screenWidth;
-    int vpHeight = 0.9 * screenHeight;
+    int vpHeight = screenHeight;
 
     float x = (2.0f * ((int)lastMousePosition.x % vpWidth)) / vpWidth - 1.0f;
-    float y = 1.0f - (2.0f * (lastMousePosition.y - 0.1f * screenHeight)) / vpHeight;
+    float y = 1.0f - 2.0f * lastMousePosition.y / vpHeight;
     float z = 1.0f;
     glm::vec3 ray_nds(x, y, z);
 
