@@ -17,18 +17,6 @@ if ( NOT CGAL_FOUND )
 endif()
 
 
-# Boost and its components
-find_package( Boost REQUIRED )
-
-if ( NOT Boost_FOUND )
-
-  message(STATUS "This project requires the Boost library, and will not be compiled.")
-
-  return()  
-
-endif()
-
-
 # OpenGL
 find_package(OpenGL REQUIRED)
 
